@@ -1,43 +1,66 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum DefendorError {
-    #[error(transparent)]
-    GetrandomError(#[from] getrandom::Error),
-
-    #[error(transparent)]
-    Argon2Error(#[from] argon2::Error),
-
-    #[error(transparent)]
-    AesGcmError(#[from] aes_gcm::Error),
-
-    #[error(transparent)]
-    StdIoError(#[from] std::io::Error),
-
-    #[error(transparent)]
-    SerdeJsonError(#[from] serde_json::Error),
-
-    #[error(transparent)]
-    Base64ctError(#[from] base64ct::Error),
-
-    #[cfg(target_os = "windows")]
-    #[error(transparent)]
-    WindowsCoreError(#[from] windows::core::Error),
-
-    #[error("Invalid key length")]
-    InvalidKeyLength,
-
-    #[error("Invalid encrypted data")]
-    InvalidEncryptedData,
-
-    #[error("Biometric initialization failed")]
-    BiometricInitializationFailed,
-
-    #[error("Password error")]
-    PasswordError,
-
-    #[error("Crypto not initialized")]
-    CryptoNotInit,
+#[non_exhaustive]
+pub enum XSecError {
+    #[error("XSec metadata was not found")]
+    NotFound,
+    #[error("XSec metadata already exists")]
+    AlreadyExists,
+    #[error("XSec is locked")]
+    Locked,
+    #[error("XSec has been destroyed")]
+    Destroyed,
+    #[error("XSec is already unlocked")]
+    AlreadyUnlocked,
+    #[error("authentication failed")]
+    AuthenticationFailed,
+    #[error("XSec metadata is corrupted")]
+    Corrupted,
+    #[error("ciphertext is invalid")]
+    InvalidCiphertext,
+    #[error("format version is unsupported")]
+    UnsupportedVersion,
+    #[error("algorithm is unsupported")]
+    UnsupportedAlgorithm,
+    #[error("key protector was not found")]
+    ProtectorNotFound,
+    #[error("key protector already exists")]
+    ProtectorAlreadyExists,
+    #[error("the last key protector cannot be removed")]
+    LastProtector,
+    #[error("storage error: {source}")]
+    Storage {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("key protector error: {source}")]
+    Protector {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("cryptographic operation failed")]
+    Crypto,
 }
 
-pub type DefendorResult<T> = Result<T, DefendorError>;
+impl XSecError {
+    #[cfg(feature = "file-storage")]
+    pub(crate) fn storage<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::Storage {
+            source: Box::new(source),
+        }
+    }
+
+    #[cfg(feature = "password-protector")]
+    pub(crate) fn protector<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::Protector {
+            source: Box::new(source),
+        }
+    }
+}
+
+pub type XSecResult<T> = Result<T, XSecError>;
