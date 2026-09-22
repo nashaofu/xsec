@@ -20,23 +20,21 @@ const VERSION: u16 = 1;
 const NONCE_LEN: usize = 12;
 const CHALLENGE: &[u8] = b"xsec:windows-hello:v1:authorize";
 
-pub struct XSecWindowsHelloProtector {
+pub struct XSecBiometricProtector {
     name: String,
 }
 
-impl XSecWindowsHelloProtector {
+impl XSecBiometricProtector {
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
     }
+
     fn sign(&self) -> XSecResult<Vec<u8>> {
         let name = HSTRING::from(&self.name);
-        let result = match KeyCredentialManager::OpenAsync(&name)
+        let result = KeyCredentialManager::OpenAsync(&name)
             .map_err(map_error)?
             .get()
-            .map_err(map_error)?
-        {
-            value => value,
-        };
+            .map_err(map_error)?;
         let credential = result.Credential().map_err(map_error)?;
         let input = CryptographicBuffer::CreateFromByteArray(CHALLENGE).map_err(map_error)?;
         let response = credential
@@ -52,6 +50,7 @@ impl XSecWindowsHelloProtector {
         CryptographicBuffer::CopyToByteArray(&buffer, &mut bytes).map_err(map_error)?;
         Ok(bytes.as_ref().to_vec())
     }
+
     fn ensure_credential(&self) -> XSecResult<()> {
         let name = HSTRING::from(&self.name);
         match KeyCredentialManager::OpenAsync(&name)
@@ -75,6 +74,7 @@ impl XSecWindowsHelloProtector {
             }
         }
     }
+
     fn derived_key(&self) -> XSecResult<[u8; 32]> {
         self.ensure_credential()?;
         let signature = self.sign()?;
@@ -82,10 +82,11 @@ impl XSecWindowsHelloProtector {
     }
 }
 
-impl XSecKeyProtector for XSecWindowsHelloProtector {
+impl XSecKeyProtector for XSecBiometricProtector {
     fn kind(&self) -> &'static str {
         KIND
     }
+
     async fn wrap_key<'a>(&'a self, key: &'a SecretBox<[u8; 32]>) -> XSecResult<Vec<u8>> {
         let derived = self.derived_key()?;
         let mut nonce = [0u8; NONCE_LEN];
@@ -110,6 +111,7 @@ impl XSecKeyProtector for XSecWindowsHelloProtector {
         payload.extend_from_slice(&ciphertext);
         Ok(payload)
     }
+
     async fn unwrap_key<'a>(&'a self, payload: &'a [u8]) -> XSecResult<SecretBox<[u8; 32]>> {
         if payload.len() < 4 + NONCE_LEN + 16
             || u16::from_be_bytes([payload[0], payload[1]]) != VERSION

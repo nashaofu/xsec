@@ -18,6 +18,16 @@ enum State<S> {
     Unlocked(S, Metadata, SecretBox<[u8; 32]>),
     Destroyed(S),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XSecStatus {
+    Empty,
+    Uninitialized,
+    Locked,
+    Unlocked,
+    Destroyed,
+}
+
 pub struct XSec<S> {
     state: State<S>,
 }
@@ -84,6 +94,15 @@ impl<S: XSecStorage> XSec<S> {
     }
     pub fn is_destroyed(&self) -> bool {
         matches!(self.state, State::Destroyed(..))
+    }
+    pub fn status(&self) -> XSecStatus {
+        match self.state {
+            State::Empty => XSecStatus::Empty,
+            State::Uninitialized(_) => XSecStatus::Uninitialized,
+            State::Locked(..) => XSecStatus::Locked,
+            State::Unlocked(..) => XSecStatus::Unlocked,
+            State::Destroyed(_) => XSecStatus::Destroyed,
+        }
     }
     pub async fn unlock<P: XSecKeyProtector>(&mut self, p: &P) -> XSecResult<()> {
         let (s, m) = match std::mem::replace(&mut self.state, State::Empty) {

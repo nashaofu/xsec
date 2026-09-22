@@ -1,6 +1,6 @@
 use secrecy::{ExposeSecret, SecretBox};
 use std::sync::{Arc, Mutex};
-use xsec::{XSec, XSecError, XSecKeyProtector, XSecResult, XSecStorage};
+use xsec::{XSec, XSecError, XSecKeyProtector, XSecResult, XSecStatus, XSecStorage};
 #[derive(Clone, Default)]
 struct Mem(Arc<Mutex<Option<Vec<u8>>>>);
 impl XSecStorage for Mem {
@@ -50,4 +50,10 @@ async fn lifecycle() {
     y.load(s).await.unwrap();
     y.unlock(&p).await.unwrap();
     assert_eq!(y.decrypt_with_aad(&c, b"id").unwrap().as_slice(), b"hello");
+}
+
+#[test]
+fn status_reports_empty() {
+    let xsec: XSec<Mem> = XSec::new();
+    assert_eq!(xsec.status(), XSecStatus::Empty);
 }
