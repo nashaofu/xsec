@@ -22,8 +22,8 @@ mod password;
 #[cfg(feature = "password-protector")]
 pub use password::XSecPasswordProtector;
 
-#[cfg(feature = "biometric")]
-mod biometric;
+#[cfg(feature = "system-protector")]
+mod system;
 
-#[cfg(feature = "biometric")]
-pub use biometric::XSecBiometricProtector;
+#[cfg(feature = "system-protector")]
+pub use system::XSecSystemProtector;

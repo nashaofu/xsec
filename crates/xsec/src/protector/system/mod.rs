@@ -1,26 +1,25 @@
-#[cfg(all(feature = "biometric", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 mod windows;
 
-#[cfg(feature = "biometric")]
 #[cfg(target_os = "windows")]
-pub use windows::XSecBiometricProtector;
+pub use windows::XSecSystemProtector;
 
-#[cfg(all(feature = "biometric", not(target_os = "windows")))]
-pub struct XSecBiometricProtector {
+#[cfg(not(target_os = "windows"))]
+pub struct XSecSystemProtector {
     _name: String,
 }
 
-#[cfg(all(feature = "biometric", not(target_os = "windows")))]
-impl XSecBiometricProtector {
+#[cfg(not(target_os = "windows"))]
+impl XSecSystemProtector {
     pub fn new(name: impl Into<String>) -> Self {
         Self { _name: name.into() }
     }
 }
 
-#[cfg(all(feature = "biometric", not(target_os = "windows")))]
-impl crate::XSecKeyProtector for XSecBiometricProtector {
+#[cfg(not(target_os = "windows"))]
+impl crate::XSecKeyProtector for XSecSystemProtector {
     fn kind(&self) -> &'static str {
-        "biometric"
+        "system"
     }
 
     async fn wrap_key<'a>(

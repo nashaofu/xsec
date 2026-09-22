@@ -1,9 +1,9 @@
-use xsec::{XSec, XSecBiometricProtector, XSecFileStorage, XSecResult};
+use xsec::{XSec, XSecFileStorage, XSecResult, XSecSystemProtector};
 
 #[tokio::main]
 async fn main() -> XSecResult<()> {
-    let storage = XSecFileStorage::new("target/biometric.xsec");
-    let protector = XSecBiometricProtector::new("xsec-example-biometric");
+    let storage = XSecFileStorage::new("target/system.xsec");
+    let protector = XSecSystemProtector::new("xsec-example-system");
 
     let mut xsec = XSec::new();
     xsec.load(storage).await?;

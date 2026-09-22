@@ -14,8 +14,8 @@ pub use xsec::{XSec, XSecStatus};
 #[cfg(feature = "password-protector")]
 pub use protector::XSecPasswordProtector;
 
-#[cfg(feature = "biometric")]
-pub use protector::XSecBiometricProtector;
+#[cfg(feature = "system-protector")]
+pub use protector::XSecSystemProtector;
 
 #[cfg(feature = "file-storage")]
 pub use storage::XSecFileStorage;

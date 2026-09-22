@@ -66,8 +66,8 @@ pub use storage::XSecFileStorage;
 #[cfg(feature = "macos-keychain")]
 pub use protector::XSecMacOsKeychainProtector;
 
-#[cfg(feature = "biometric")]
-pub use protector::XSecBiometricProtector;
+#[cfg(feature = "system-protector")]
+pub use protector::XSecSystemProtector;
 
 #[cfg(feature = "linux-secret-service")]
 pub use protector::XSecLinuxSecretServiceProtector;

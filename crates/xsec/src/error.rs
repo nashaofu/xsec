@@ -21,6 +21,14 @@ pub enum XSecError {
     AlreadyUnlocked,
     #[error("authentication failed")]
     AuthenticationFailed,
+    #[error("Windows Hello is not supported")]
+    WindowsHelloNotSupported,
+    #[error("Windows Hello is not configured")]
+    WindowsHelloNotConfigured,
+    #[error("the cryptographic provider does not support required user verification")]
+    ProviderNotSupported,
+    #[error("user verification is required")]
+    UserVerificationRequired,
     #[error("XSec metadata is corrupted")]
     Corrupted,
     #[error("ciphertext is invalid")]

@@ -777,6 +777,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xsec-cli"
+version = "0.0.1"
+dependencies = [
+ "secrecy",
+ "tokio",
+ "xsec",
+]
+
+[[package]]
 name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
