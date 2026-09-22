@@ -7,17 +7,13 @@ async fn main() -> XSecResult<()> {
     let password = SecretBox::new(Box::new(b"correct horse battery staple".to_vec()));
     let protector = XSecPasswordProtector::new(password);
 
-    let xsec = if storage.exists().await? {
-        let mut xsec = XSec::open(storage).await?;
-        // xsec.add_key_protector(&protector).await?;
+    let mut xsec = XSec::new();
+    xsec.load(storage).await?;
+    if xsec.is_initialized() {
         xsec.unlock(&protector).await?;
-        xsec
     } else {
-        let mut xsec = XSec::create(storage).await?;
-        xsec.add_key_protector(&protector).await?;
-        xsec.unlock(&protector).await?;
-        xsec
-    };
+        xsec.create(&protector).await?;
+    }
 
     let plaintext = "secret data";
     println!("Plaintext: {}", plaintext);

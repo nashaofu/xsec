@@ -21,3 +21,9 @@ mod password;
 
 #[cfg(feature = "password-protector")]
 pub use password::XSecPasswordProtector;
+
+#[cfg(all(feature = "windows-hello", target_os = "windows"))]
+mod windows;
+
+#[cfg(all(feature = "windows-hello", target_os = "windows"))]
+pub use windows::XSecWindowsHelloProtector;

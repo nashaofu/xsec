@@ -7,6 +7,12 @@ pub enum XSecError {
     NotFound,
     #[error("XSec metadata already exists")]
     AlreadyExists,
+    #[error("XSec storage has not been loaded")]
+    StorageNotLoaded,
+    #[error("XSec storage has already been loaded")]
+    AlreadyLoaded,
+    #[error("XSec is not initialized")]
+    NotInitialized,
     #[error("XSec is locked")]
     Locked,
     #[error("XSec has been destroyed")]

@@ -75,50 +75,86 @@ pub use protector::XSecLinuxSecretServiceProtector;
 
 ## XSec
 
-`XSec<S>` 是唯一的状态主体。内部保存 storage、已解析的 metadata 和可选的 DEK。
+`XSec<S>` 是唯一的状态主体。storage、metadata 和 DEK 由一个状态枚举持有，不另外保存彼此独立的 `Option` 字段。
 
 ```rust
 pub struct XSec<S> {
-    // Internal fields are private.
+    state: XSecState<S>,
+}
+
+enum XSecState<S> {
+    Empty,
+    Uninitialized { storage: S },
+    Locked { storage: S, metadata: Metadata },
+    Unlocked {
+        storage: S,
+        metadata: Metadata,
+        key: SecretBox<[u8; 32]>,
+    },
+    Destroyed { storage: S },
 }
 ```
 
-内部状态至少包含：
+| 状态 | Storage | Metadata | DEK |
+|---|---:|---:|---:|
+| `Empty` | 否 | 否 | 否 |
+| `Uninitialized` | 是 | 否 | 否 |
+| `Locked` | 是 | 是 | 否 |
+| `Unlocked` | 是 | 是 | 是 |
+| `Destroyed` | 是 | 否 | 否 |
 
-```rust
-enum XSecState {
-    Locked,
-    Unlocked(SecretBox<[u8; 32]>),
-    Destroyed,
-}
-```
+状态枚举必须排除 `Locked` 但没有 metadata、`Unlocked` 但没有 DEK、`Destroyed` 仍持有 metadata 等非法组合。
 
-### 创建和打开
-
-```rust
-impl<S: XSecStorage> XSec<S> {
-    pub async fn create(storage: S) -> XSecResult<Self>;
-
-    pub async fn open(storage: S) -> XSecResult<Self>;
-}
-```
-
-`create` 执行以下操作：
-
-- 确认 storage 中不存在已有数据。
-- 创建空的内存态 protector 列表，不生成 metadata blob，也不写入 storage。
-- 返回锁定状态的 `XSec<S>`，不生成或暂存 DEK。
-
-storage 已存在数据时，`create` 返回 `XSecError::AlreadyExists`。该保证依赖调用方遵守单写者约束；第一版不保证多个进程同时调用 `create` 时只有一个成功。新建实例第一次调用 `add_key_protector` 时才生成随机 DEK、用该 protector 包装 DEK 并原子保存 metadata；DEK 只在该调用期间存在，实例保持锁定，调用方必须使用已添加的 protector 解锁。在此之前丢弃实例不会修改 storage。
-
-`open` 读取完整 metadata 并执行格式和结构校验。成功后返回锁定状态的 `XSec<S>`，不会自动触发密码、生物识别或远程 KMS 认证。
-
-storage 中没有数据时，`open` 返回 `XSecError::NotFound`。metadata 无法解析或结构校验失败时，返回 `XSecError::Corrupted`。
-
-### 锁定和解锁
+### 构造、加载和创建
 
 ```rust
 impl<S: XSecStorage> XSec<S> {
+    pub fn new() -> Self;
+
+    pub async fn load(&mut self, storage: S) -> XSecResult<()>;
+
+    pub async fn create<P: XSecKeyProtector>(
+        &mut self,
+        protector: &P,
+    ) -> XSecResult<()>;
+}
+```
+
+`new` 不执行 I/O，返回 `Empty` 状态。
+
+`load` 只允许在 `Empty` 状态调用，并取得 storage 的所有权。storage 中没有 metadata 时进入 `Uninitialized { storage }`；存在合法 metadata 时严格解析并进入 `Locked { storage, metadata }`。非 `Empty` 状态调用返回 `XSecError::AlreadyLoaded`。加载或解析失败时实例保持 `Empty`，传入的 storage 被释放，重试时调用方需要重新构造 storage。
+
+`create` 只允许在 `Uninitialized` 状态调用，并执行以下操作：
+
+- 生成随机 DEK。
+- 使用 protector 包装 DEK。
+- 生成包含第一个 protector 的完整 metadata blob。
+- 通过状态中的 storage 原子保存 metadata。
+- 保存成功后进入 `Unlocked { storage, metadata, key }`。
+
+随机数生成、protector 包装、metadata 编码和 storage 保存必须先在局部变量上全部完成。只有所有操作成功后才能一次性替换状态；任一步骤失败时实例保持 `Uninitialized`。
+
+`Empty` 状态调用 `create` 返回 `XSecError::StorageNotLoaded`；已初始化状态调用返回 `XSecError::AlreadyExists`。第一版仍要求调用方遵守单写者约束；若 Storage 支持 create-if-absent，`create` 应使用该原子语义。
+
+典型入口流程：
+
+```rust
+let mut xsec = XSec::new();
+xsec.load(storage).await?;
+
+if xsec.is_initialized() {
+    xsec.unlock(&protector).await?;
+} else {
+    xsec.create(&protector).await?;
+}
+```
+
+### 状态查询、锁定和解锁
+
+```rust
+impl<S: XSecStorage> XSec<S> {
+    pub fn is_loaded(&self) -> bool;
+    pub fn is_initialized(&self) -> bool;
     pub fn is_locked(&self) -> bool;
     pub fn is_destroyed(&self) -> bool;
 
@@ -131,9 +167,11 @@ impl<S: XSecStorage> XSec<S> {
 }
 ```
 
-`unlock` 根据 `protector.kind()` 查找唯一的内部保护器记录，恢复 DEK 并保存到受保护内存。认证失败返回 `XSecError::AuthenticationFailed`。已解锁时重复调用返回 `XSecError::AlreadyUnlocked`。
+`is_loaded` 在 `Empty` 时返回 `false`，其余状态返回 `true`。`is_initialized` 只在 `Locked` 和 `Unlocked` 时返回 `true`。`is_locked` 在除 `Unlocked` 外的所有状态返回 `true`。
 
-`lock` 清除已解锁实例内存中的 DEK。新建、已锁定或已销毁状态调用时直接成功。XSec 销毁后，`is_locked` 返回 `true`，`is_destroyed` 返回 `true`，`key_protector_kinds` 返回空迭代器；解锁、加解密和保护器管理操作返回 `XSecError::Destroyed`。
+`unlock` 只允许在 `Locked` 状态调用。它根据 `protector.kind()` 查找保护器记录，恢复 DEK，验证原始 metadata MAC，并在全部成功后进入 `Unlocked { storage, metadata, key }`。未初始化返回 `XSecError::NotInitialized`，认证失败返回 `XSecError::AuthenticationFailed`，已解锁时重复调用返回 `XSecError::AlreadyUnlocked`。
+
+`lock` 将 `Unlocked { storage, metadata, key }` 转换为 `Locked { storage, metadata }` 并清除 DEK。`Uninitialized`、`Locked` 和 `Destroyed` 状态调用时幂等成功；`Empty` 状态返回 `XSecError::StorageNotLoaded`。
 
 ### 加密和解密
 
@@ -167,7 +205,7 @@ impl<S: XSecStorage> XSec<S> {
 
 AAD 会参与完整性认证，但不会被加密。适合放入 AAD 的内容包括租户 ID、用户 ID、记录 ID 和字段名。密码、token 或无法稳定重建的数据不得放入 AAD。
 
-锁定状态调用以上方法时返回 `XSecError::Locked`。
+只有 `Unlocked` 状态能够加解密。`Empty` 返回 `XSecError::StorageNotLoaded`，`Uninitialized` 返回 `XSecError::NotInitialized`，`Locked` 返回 `XSecError::Locked`，`Destroyed` 返回 `XSecError::Destroyed`。
 
 XSec 每次加密都生成新的随机 nonce。`encrypt_with_nonce` 和 `decrypt_with_nonce` 仅供 crate 内部使用。
 
@@ -197,11 +235,11 @@ impl<S: XSecStorage> XSec<S> {
 }
 ```
 
-这些操作只允许在已解锁状态执行。
+保护器管理只允许在 `Unlocked` 状态执行。`add_key_protector` 不负责首次初始化，也不生成 DEK；第一个 protector 必须由 `create` 写入。
 
 每种 `kind` 最多保存一个保护器。`key_protector_kinds` 返回当前 metadata 中的保护器类型，调用方可以据此选择密码、生物识别或 KMS 解锁流程。XSec 解锁前无法验证整份 metadata 的真实性，因此该列表在成功解锁前只能作为界面提示，不能作为安全决策依据。
 
-`add_key_protector` 使用新的保护方式包装当前 DEK。空 metadata 的锁定实例允许添加第一个 protector，并在该操作内生成随机 DEK；保存成功后实例仍保持锁定。后续添加操作只允许在成功解锁后执行。相同 `kind` 已存在时返回 `XSecError::ProtectorAlreadyExists`。`remove_key_protector` 按 `kind` 删除保护器，但必须保证至少保留一种可用的解锁方式。`replace_key_protector` 使用新的保护器重新包装同一个 DEK，可用于修改密码或迁移认证方式；新保护器的 `kind` 已被其他记录占用时，返回 `XSecError::ProtectorAlreadyExists`。
+`add_key_protector` 使用新的保护方式包装当前 DEK。相同 `kind` 已存在时返回 `XSecError::ProtectorAlreadyExists`。`remove_key_protector` 按 `kind` 删除保护器，但必须保证至少保留一种可用的解锁方式。`replace_key_protector` 使用新的保护器重新包装同一个 DEK，可用于修改密码或迁移认证方式；新保护器的 `kind` 已被其他记录占用时，返回 `XSecError::ProtectorAlreadyExists`。
 
 保护器变更必须先在临时 metadata 上完成。只有 storage 保存成功后，XSec 才替换内存中的 metadata；保存失败时当前实例保持原有 metadata，不自动重试。
 
@@ -213,13 +251,13 @@ impl<S: XSecStorage> XSec<S> {
 impl<S: XSecStorage> XSec<S> {
     pub async fn destroy(&mut self) -> XSecResult<()>;
 
-    pub fn into_storage(self) -> S;
+    pub fn into_storage(self) -> Option<S>;
 }
 ```
 
-`destroy` 删除 storage 中的完整 metadata，并清除内存中的 DEK。删除失败时保留当前实例，允许调用方重试。删除成功后进入 `Destroyed` 状态，重复调用 `destroy` 直接返回成功。
+`destroy` 删除 storage 中的完整 metadata，并清除内存中的 DEK。删除失败时保留当前状态，允许调用方重试；成功后进入 `Destroyed { storage }`。重复调用直接成功，`Empty` 状态调用返回 `XSecError::StorageNotLoaded`。
 
-`into_storage` 消费 `XSec` 并返回 storage，供调用方管理连接或资源生命周期。
+`into_storage` 消费 `XSec`。`Empty` 返回 `None`，其余状态返回 `Some(storage)`。
 
 ## XSecStorage
 
@@ -445,6 +483,9 @@ combined_aad =
 pub enum XSecError {
     NotFound,
     AlreadyExists,
+    StorageNotLoaded,
+    AlreadyLoaded,
+    NotInitialized,
     Locked,
     Destroyed,
     AlreadyUnlocked,
@@ -481,8 +522,8 @@ pub type XSecResult<T> = std::result::Result<T, XSecError>;
 | AES-GCM encrypt/decrypt | sync | 纯内存计算 |
 | 密文编码和解析 | sync | 纯内存计算 |
 | Argon2id | sync computation + `tokio::task::spawn_blocking` | CPU 和内存密集型计算 |
-| `XSec::create/open/unlock/destroy` | async | 编排 Storage、Protector 或阻塞任务 |
-| `XSec::encrypt/decrypt/lock` | sync | 不执行 I/O |
+| `XSec::load/create/unlock/destroy` | async | 编排 Storage、Protector 或阻塞任务 |
+| `XSec::new/encrypt/decrypt/lock` | sync | 不执行 I/O |
 
 ## 不公开的接口
 
@@ -524,9 +565,14 @@ async fn run() -> XSecResult<()> {
     let password = SecretBox::new(Box::new(b"correct horse battery staple".to_vec()));
     let protector = XSecPasswordProtector::new(password);
 
-    let mut xsec = XSec::create(storage).await?;
-    xsec.add_key_protector(&protector).await?;
-    xsec.unlock(&protector).await?;
+    let mut xsec = XSec::new();
+    xsec.load(storage).await?;
+
+    if xsec.is_initialized() {
+        xsec.unlock(&protector).await?;
+    } else {
+        xsec.create(&protector).await?;
+    }
     let ciphertext = xsec.encrypt_with_aad(
         b"alice@example.com",
         b"user:123/profile/email",

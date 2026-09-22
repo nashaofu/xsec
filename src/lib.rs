@@ -14,5 +14,8 @@ pub use xsec::XSec;
 #[cfg(feature = "password-protector")]
 pub use protector::XSecPasswordProtector;
 
+#[cfg(all(feature = "windows-hello", target_os = "windows"))]
+pub use protector::XSecWindowsHelloProtector;
+
 #[cfg(feature = "file-storage")]
 pub use storage::XSecFileStorage;
