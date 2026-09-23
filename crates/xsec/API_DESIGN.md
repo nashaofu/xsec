@@ -32,7 +32,7 @@ XSec 提供以下安全保证：
 XSec 基于以下信任前提：
 
 - 操作系统、进程地址空间、随机数源和当前运行的 XSec 代码可信。
-- 调用方提供的第三方 `XSecKeyProtector` 可以接触明文 DEK，属于受信任代码。
+- 调用方提供的第三方 `XSecProtector` 可以接触明文 DEK，属于受信任代码。
 - 同一个持久化对象由单个写入方管理。第一版不处理多端同步和并发写入冲突。
 
 XSec 不提供以下保证：
@@ -50,28 +50,25 @@ crate 根导出以下类型：
 
 ```rust
 pub use error::{XSecError, XSecResult};
-pub use protector::XSecKeyProtector;
+pub use protector::XSecProtector;
 #[cfg(feature = "password-protector")]
 pub use protector::XSecPasswordProtector;
 pub use storage::XSecStorage;
 pub use xsec::XSec;
 ```
 
-内置 Storage 和平台保护器通过对应 feature 导出：
+内置 Storage 和系统保护器通过对应 feature 导出：
 
 ```rust
 #[cfg(feature = "file-storage")]
 pub use storage::XSecFileStorage;
 
-#[cfg(feature = "macos-keychain")]
-pub use protector::XSecMacOsKeychainProtector;
-
 #[cfg(feature = "system-protector")]
 pub use protector::XSecSystemProtector;
-
-#[cfg(feature = "linux-secret-service")]
-pub use protector::XSecLinuxSecretServiceProtector;
 ```
+
+`XSecSystemProtector` 的公开 API、identity、payload 和平台分发规则见
+[`SYSTEM_PROTECTOR.md`](SYSTEM_PROTECTOR.md)。
 
 ## XSec
 
@@ -95,13 +92,13 @@ enum XSecState<S> {
 }
 ```
 
-| 状态 | Storage | Metadata | DEK |
-|---|---:|---:|---:|
-| `Empty` | 否 | 否 | 否 |
-| `Uninitialized` | 是 | 否 | 否 |
-| `Locked` | 是 | 是 | 否 |
-| `Unlocked` | 是 | 是 | 是 |
-| `Destroyed` | 是 | 否 | 否 |
+| 状态            | Storage | Metadata | DEK |
+| --------------- | ------: | -------: | --: |
+| `Empty`         |      否 |       否 |  否 |
+| `Uninitialized` |      是 |       否 |  否 |
+| `Locked`        |      是 |       是 |  否 |
+| `Unlocked`      |      是 |       是 |  是 |
+| `Destroyed`     |      是 |       否 |  否 |
 
 状态枚举必须排除 `Locked` 但没有 metadata、`Unlocked` 但没有 DEK、`Destroyed` 仍持有 metadata 等非法组合。
 
@@ -113,7 +110,7 @@ impl<S: XSecStorage> XSec<S> {
 
     pub async fn load(&mut self, storage: S) -> XSecResult<()>;
 
-    pub async fn create<P: XSecKeyProtector>(
+    pub async fn create<P: XSecProtector>(
         &mut self,
         protector: &P,
     ) -> XSecResult<()>;
@@ -158,7 +155,7 @@ impl<S: XSecStorage> XSec<S> {
     pub fn is_locked(&self) -> bool;
     pub fn is_destroyed(&self) -> bool;
 
-    pub async fn unlock<P: XSecKeyProtector>(
+    pub async fn unlock<P: XSecProtector>(
         &mut self,
         protector: &P,
     ) -> XSecResult<()>;
@@ -217,7 +214,7 @@ impl<S: XSecStorage> XSec<S> {
         &self,
     ) -> impl Iterator<Item = &str>;
 
-    pub async fn add_key_protector<P: XSecKeyProtector>(
+    pub async fn add_key_protector<P: XSecProtector>(
         &mut self,
         protector: &P,
     ) -> XSecResult<()>;
@@ -227,7 +224,7 @@ impl<S: XSecStorage> XSec<S> {
         kind: &str,
     ) -> XSecResult<()>;
 
-    pub async fn replace_key_protector<P: XSecKeyProtector>(
+    pub async fn replace_key_protector<P: XSecProtector>(
         &mut self,
         kind: &str,
         protector: &P,
@@ -311,12 +308,12 @@ pub trait XSecStorage: Send + Sync {
 
 第一版不处理多个客户端同时写入同一个持久化对象。调用方或服务端必须保证单写者语义。
 
-## XSecKeyProtector
+## XSecProtector
 
-`XSecKeyProtector` 负责包装和解包 DEK。它不负责保存 metadata，也不参与业务数据加密。XSec 只保存保护器的 `kind` 和不透明 payload。
+`XSecProtector` 负责包装和解包 DEK。它不负责保存 metadata，也不参与业务数据加密。XSec 只保存保护器的 `kind` 和不透明 payload。
 
 ```rust
-pub trait XSecKeyProtector: Send + Sync {
+pub trait XSecProtector: Send + Sync {
     fn kind(&self) -> &'static str;
 
     fn wrap_key<'a>(
@@ -339,9 +336,7 @@ pub trait XSecKeyProtector: Send + Sync {
 
 payload 格式由 Protector 自己管理，必须包含格式版本并兼容已发布的旧版本。需要认证的算法标识、版本、KDF 参数和系统密钥引用都必须绑定到 payload 的完整性校验中。
 
-密码保护器的 payload 包含格式版本、Argon2id 参数、salt、nonce 和加密后的 DEK。平台保护器的 payload 可以包含格式版本、系统密钥引用和被包装的 DEK。
-
-Windows Hello 等平台认证不能通过随机签名结果派生稳定 KEK。平台保护器必须使用稳定密钥执行 wrap/unwrap，或者在系统安全存储中保存密钥并持久化其引用。
+密码保护器的 payload 包含格式版本、Argon2id 参数、salt、nonce 和加密后的 DEK。系统保护器的 payload 规则见 [`SYSTEM_PROTECTOR.md`](SYSTEM_PROTECTOR.md)。
 
 ### metadata 完整性
 
@@ -412,25 +407,25 @@ impl XSecPasswordProtector {
 
 v1 新建密码保护器时使用以下固定参数，调用方不能覆盖：
 
-| 参数 | 默认值 |
-|---|---:|
-| memory cost | 65536 KiB |
-| time cost | 3 |
-| parallelism | 1 |
-| salt length | 16 bytes |
-| derived key length | 32 bytes |
+| 参数               |    默认值 |
+| ------------------ | --------: |
+| memory cost        | 65536 KiB |
+| time cost          |         3 |
+| parallelism        |         1 |
+| salt length        |  16 bytes |
+| derived key length |  32 bytes |
 
 密码保护器在解析持久化 payload 后、启动 Argon2id 前，必须执行以下检查：
 
-| 项目 | v1 接受范围 |
-|---|---:|
-| payload length | 不超过 64 KiB |
-| memory cost | 19456–262144 KiB |
-| time cost | 2–10 |
-| parallelism | 1–8 |
-| salt length | 16–64 bytes |
-| nonce length | 必须等于算法规定的长度 |
-| derived key length | 必须为 32 bytes |
+| 项目               |            v1 接受范围 |
+| ------------------ | ---------------------: |
+| payload length     |          不超过 64 KiB |
+| memory cost        |       19456–262144 KiB |
+| time cost          |                   2–10 |
+| parallelism        |                    1–8 |
+| salt length        |            16–64 bytes |
+| nonce length       | 必须等于算法规定的长度 |
+| derived key length |        必须为 32 bytes |
 
 memory cost 还必须满足 Argon2id 对 parallelism 的结构约束。参数越界、整数转换溢出或长度不匹配时，必须在分配 KDF 工作内存前返回 `XSecError::Corrupted`；版本不受支持时返回 `XSecError::UnsupportedVersion`。不得尝试使用更弱参数或猜测性解析。
 
@@ -515,15 +510,15 @@ pub type XSecResult<T> = std::result::Result<T, XSecError>;
 
 ## 同步与异步边界
 
-| 操作 | 接口形式 | 原因 |
-|---|---|---|
-| `XSecStorage::load/save/delete` | async | 文件、网络和数据库 I/O |
-| `XSecKeyProtector::wrap_key/unwrap_key` | async | 可能触发系统认证或远程 KMS |
-| AES-GCM encrypt/decrypt | sync | 纯内存计算 |
-| 密文编码和解析 | sync | 纯内存计算 |
-| Argon2id | sync computation + `tokio::task::spawn_blocking` | CPU 和内存密集型计算 |
-| `XSec::load/create/unlock/destroy` | async | 编排 Storage、Protector 或阻塞任务 |
-| `XSec::new/encrypt/decrypt/lock` | sync | 不执行 I/O |
+| 操作                                 | 接口形式                                         | 原因                               |
+| ------------------------------------ | ------------------------------------------------ | ---------------------------------- |
+| `XSecStorage::load/save/delete`      | async                                            | 文件、网络和数据库 I/O             |
+| `XSecProtector::wrap_key/unwrap_key` | async                                            | 可能触发系统认证或远程 KMS         |
+| AES-GCM encrypt/decrypt              | sync                                             | 纯内存计算                         |
+| 密文编码和解析                       | sync                                             | 纯内存计算                         |
+| Argon2id                             | sync computation + `tokio::task::spawn_blocking` | CPU 和内存密集型计算               |
+| `XSec::load/create/unlock/destroy`   | async                                            | 编排 Storage、Protector 或阻塞任务 |
+| `XSec::new/encrypt/decrypt/lock`     | sync                                             | 不执行 I/O                         |
 
 ## 不公开的接口
 
@@ -541,7 +536,7 @@ pub type XSecResult<T> = std::result::Result<T, XSecError>;
 ## 暂不纳入
 
 - `Vault`、`LockedVault`、`UnlockedVault` 和 `VaultStatus`。
-- `dyn XSecStorage` 和 `dyn XSecKeyProtector`。
+- `dyn XSecStorage` 和 `dyn XSecProtector`。
 - 流式加密和流式解密。
 - 多端同步、并发写入检测和冲突合并。
 - 自动降级到更弱的认证方式。

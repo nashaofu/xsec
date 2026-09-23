@@ -1,5 +1,5 @@
 use crate::{
-    XSecError, XSecKeyProtector, XSecResult, XSecStorage,
+    XSecError, XSecProtector, XSecResult, XSecStorage,
     ciphertext::{Ciphertext, CiphertextHeader},
     metadata::{Metadata, ProtectorRecord, validate_kind},
 };
@@ -48,7 +48,7 @@ impl<S: XSecStorage> XSec<S> {
         };
         Ok(())
     }
-    pub async fn create<P: XSecKeyProtector>(&mut self, p: &P) -> XSecResult<()> {
+    pub async fn create<P: XSecProtector>(&mut self, p: &P) -> XSecResult<()> {
         let storage = match std::mem::replace(&mut self.state, State::Empty) {
             State::Uninitialized(s) => s,
             State::Empty => return Err(XSecError::StorageNotLoaded),
@@ -104,7 +104,7 @@ impl<S: XSecStorage> XSec<S> {
             State::Destroyed(_) => XSecStatus::Destroyed,
         }
     }
-    pub async fn unlock<P: XSecKeyProtector>(&mut self, p: &P) -> XSecResult<()> {
+    pub async fn unlock<P: XSecProtector>(&mut self, p: &P) -> XSecResult<()> {
         let (s, m) = match std::mem::replace(&mut self.state, State::Empty) {
             State::Locked(s, m) => (s, m),
             x => {
@@ -203,7 +203,7 @@ impl<S: XSecStorage> XSec<S> {
             _ => Vec::new().into_iter(),
         }
     }
-    pub async fn add_key_protector<P: XSecKeyProtector>(&mut self, p: &P) -> XSecResult<()> {
+    pub async fn add_key_protector<P: XSecProtector>(&mut self, p: &P) -> XSecResult<()> {
         let (s, m, k) = match std::mem::replace(&mut self.state, State::Empty) {
             State::Unlocked(s, m, k) => (s, m, k),
             x => {

@@ -7,7 +7,7 @@ pub mod storage;
 pub mod xsec;
 
 pub use error::{XSecError, XSecResult};
-pub use protector::XSecKeyProtector;
+pub use protector::XSecProtector;
 pub use storage::XSecStorage;
 pub use xsec::{XSec, XSecStatus};
 

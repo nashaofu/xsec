@@ -1,4 +1,4 @@
-use crate::{XSecError, XSecKeyProtector, XSecResult};
+use crate::{XSecError, XSecProtector, XSecResult};
 use secrecy::{ExposeSecret, SecretBox};
 use windows::{
     Security::{
@@ -16,7 +16,7 @@ use windows::{
     core::{Array, HSTRING, w},
 };
 
-const KIND: &str = "windows-cng";
+const KIND: &str = "system";
 const VERSION: u16 = 2;
 const KEY_SIZE: usize = 32;
 
@@ -194,7 +194,7 @@ impl XSecSystemProtector {
     }
 }
 
-impl XSecKeyProtector for XSecSystemProtector {
+impl XSecProtector for XSecSystemProtector {
     fn kind(&self) -> &'static str {
         KIND
     }

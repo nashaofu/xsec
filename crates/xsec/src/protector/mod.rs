@@ -4,7 +4,7 @@ use secrecy::SecretBox;
 
 use crate::XSecResult;
 
-pub trait XSecKeyProtector: Send + Sync {
+pub trait XSecProtector: Send + Sync {
     fn kind(&self) -> &'static str;
     fn wrap_key<'a>(
         &'a self,

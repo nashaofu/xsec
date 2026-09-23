@@ -1,6 +1,8 @@
 use secrecy::{ExposeSecret, SecretBox};
 use std::sync::{Arc, Mutex};
-use xsec::{XSec, XSecError, XSecKeyProtector, XSecResult, XSecStatus, XSecStorage};
+#[cfg(all(feature = "system-protector", not(target_os = "windows")))]
+use xsec::XSecSystemProtector;
+use xsec::{XSec, XSecError, XSecProtector, XSecResult, XSecStatus, XSecStorage};
 #[derive(Clone, Default)]
 struct Mem(Arc<Mutex<Option<Vec<u8>>>>);
 impl XSecStorage for Mem {
@@ -17,7 +19,7 @@ impl XSecStorage for Mem {
     }
 }
 struct P(&'static str, u8);
-impl XSecKeyProtector for P {
+impl XSecProtector for P {
     fn kind(&self) -> &'static str {
         self.0
     }
@@ -56,4 +58,15 @@ async fn lifecycle() {
 fn status_reports_empty() {
     let xsec: XSec<Mem> = XSec::new();
     assert_eq!(xsec.status(), XSecStatus::Empty);
+}
+
+#[cfg(all(feature = "system-protector", not(target_os = "windows")))]
+#[tokio::test]
+async fn system_protector_is_explicitly_unavailable_without_a_backend() {
+    let protector = XSecSystemProtector::new("stable-storage-id");
+    assert_eq!(protector.kind(), "system");
+    assert!(matches!(
+        protector.check_availability().await,
+        Err(XSecError::SystemProtectorUnavailable)
+    ));
 }

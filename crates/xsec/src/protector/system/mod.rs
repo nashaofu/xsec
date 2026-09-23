@@ -6,18 +6,25 @@ pub use windows::XSecSystemProtector;
 
 #[cfg(not(target_os = "windows"))]
 pub struct XSecSystemProtector {
-    _name: String,
+    identity_hash: [u8; 32],
 }
 
 #[cfg(not(target_os = "windows"))]
 impl XSecSystemProtector {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { _name: name.into() }
+        Self {
+            identity_hash: identity_hash(&name.into()),
+        }
+    }
+
+    pub async fn check_availability(&self) -> crate::XSecResult<()> {
+        let _ = self;
+        Err(crate::XSecError::SystemProtectorUnavailable)
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-impl crate::XSecKeyProtector for XSecSystemProtector {
+impl crate::XSecProtector for XSecSystemProtector {
     fn kind(&self) -> &'static str {
         "system"
     }
@@ -26,13 +33,24 @@ impl crate::XSecKeyProtector for XSecSystemProtector {
         &'a self,
         _key: &'a secrecy::SecretBox<[u8; 32]>,
     ) -> crate::XSecResult<Vec<u8>> {
-        Err(crate::XSecError::Crypto)
+        Err(crate::XSecError::SystemProtectorUnavailable)
     }
 
     async fn unwrap_key<'a>(
         &'a self,
         _payload: &'a [u8],
     ) -> crate::XSecResult<secrecy::SecretBox<[u8; 32]>> {
-        Err(crate::XSecError::Crypto)
+        let _ = (self, payload);
+        Err(crate::XSecError::SystemProtectorUnavailable)
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn identity_hash(identity: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"xsec:system-protector:v1");
+    h.update((identity.len() as u32).to_be_bytes());
+    h.update(identity.as_bytes());
+    h.finalize().into()
 }

@@ -7,7 +7,7 @@ use getrandom::fill;
 use secrecy::{ExposeSecret, SecretBox};
 use zeroize::Zeroizing;
 
-use crate::{XSecError, XSecResult, metadata::MAX_PAYLOAD_LENGTH, protector::XSecKeyProtector};
+use crate::{XSecError, XSecResult, metadata::MAX_PAYLOAD_LENGTH, protector::XSecProtector};
 
 const PASSWORD_KIND: &str = "password";
 const PAYLOAD_VERSION: u16 = 1;
@@ -30,7 +30,7 @@ impl XSecPasswordProtector {
     }
 }
 
-impl XSecKeyProtector for XSecPasswordProtector {
+impl XSecProtector for XSecPasswordProtector {
     fn kind(&self) -> &'static str {
         PASSWORD_KIND
     }

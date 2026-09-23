@@ -29,6 +29,18 @@ pub enum XSecError {
     ProviderNotSupported,
     #[error("user verification is required")]
     UserVerificationRequired,
+    #[error("system protector is unavailable on this platform")]
+    SystemProtectorUnavailable,
+    #[error("system authentication is not configured")]
+    SystemAuthenticationNotConfigured,
+    #[error("system protector is incompatible with this platform")]
+    IncompatibleSystemProtector,
+    #[error("system key was not found")]
+    SystemKeyNotFound,
+    #[error("system key was invalidated")]
+    SystemKeyInvalidated,
+    #[error("system authentication was cancelled")]
+    AuthenticationCancelled,
     #[error("XSec metadata is corrupted")]
     Corrupted,
     #[error("ciphertext is invalid")]

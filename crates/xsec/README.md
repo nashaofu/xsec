@@ -11,12 +11,12 @@ XSec 是一个跨平台数据加密库。它生成并管理数据加密密钥（
 - Argon2id 密码保护器（固定安全参数，阻塞计算由 Tokio 调度）
 - canonical binary metadata 与 HKDF/HMAC-SHA256 整体认证
 - Metadata 使用 `XSecMD` 标识，业务密文使用 `XSecCT` 标识
-- 可扩展的异步 `XSecStorage` 和 `XSecKeyProtector`
+- 可扩展的异步 `XSecStorage` 和 `XSecProtector`
 - 敏感密钥与解密结果使用 `SecretBox` / `Zeroizing`
 - `file-storage` 默认 feature 提供单 blob 原子文件存储
 - `password-protector` 默认 feature 提供 Argon2id 密码保护器
 
-`XSecStorage` 和 `XSecKeyProtector` 只定义抽象接口。具体实现位于对应子模块，并通过 feature 按需编译：`storage/file.rs`、`protector/password.rs`。
+`XSecStorage` 和 `XSecProtector` 只定义抽象接口。具体实现位于对应子模块，并通过 feature 按需编译：`storage/file.rs`、`protector/password.rs`。
 
 ## 快速开始
 
@@ -49,7 +49,7 @@ async fn main() -> XSecResult<()> {
 - `create` 返回锁定状态且尚未持久化的实例，不生成或暂存 DEK；首次添加密钥保护器时才生成 DEK 并保存 metadata。之后必须使用已添加的保护器解锁。
 - `destroy` 删除当前 Storage 中的 metadata，但不保证磁盘、备份或快照已物理擦除。
 - v1 不提供回滚保护、数据密钥轮换、多端同步或并发写入冲突处理。
-- 第三方 `XSecKeyProtector` 能接触明文 DEK，必须视为受信任代码。
+- 第三方 `XSecProtector` 能接触明文 DEK，必须视为受信任代码。
 
 ## License
 
