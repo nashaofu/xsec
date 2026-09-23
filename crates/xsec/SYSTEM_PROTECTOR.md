@@ -146,48 +146,25 @@ kind = "system"
 平台差异写入私有 payload envelope：
 
 ```text
-magic                  [4 bytes] = "XSSP"
+magic                  [6 bytes] = "XSecSP"
 format_version         u16 big-endian = 1
-backend_id             u16 big-endian
 identity_hash          [32 bytes]
-backend_payload_length u32 big-endian
-backend_payload        [backend_payload_length bytes]
+persistent_challenge   [16 bytes]
+nonce                  [12 bytes]
+wrapped_dek            [48 bytes] (AES-256-GCM ciphertext + tag)
 ```
 
-`identity_hash` 使用与平台密钥名称相同的长度分帧输入计算。解析器必须拒绝未知版本、未知 backend、字段截断、长度溢出和 payload 后的额外数据。
+`identity_hash` 使用与平台密钥名称相同的长度分帧输入计算。当前 payload 是固定长度，解析器必须拒绝未知版本、字段截断和 payload 后的额外数据。
 
-`backend_payload` 必须绑定以下内容的完整性：
+AES-256-GCM 的 AAD 是从 magic 到 nonce 结束的完整 header，必须绑定以下内容的完整性：
 
-- envelope 版本和 backend 标识。
+- envelope 版本。
 - `identity_hash`。
-- 包装算法及其参数。
-- 系统密钥引用。
+- persistent challenge 和 nonce。
 - wrapped DEK。
 
-Windows Hello backend 的 `backend_payload` 还必须包含以下字段：
-
-```text
-signature_algorithm       u16 big-endian (1 = RSASSA-PKCS1-v1_5 with SHA-256)
-kdf_algorithm             u16 big-endian (1 = HKDF-SHA-256)
-aead_algorithm            u16 big-endian (1 = AES-256-GCM)
-public_key_blob_length    u32 big-endian
-public_key_blob           [public_key_blob_length bytes]
-challenge_length          u16 big-endian
-persistent_challenge      [challenge_length bytes]
-nonce_length              u8
-nonce                     [nonce_length bytes]
-wrapped_dek_length        u32 big-endian
-wrapped_dek               [wrapped_dek_length bytes]
-```
-
-`public_key_blob` 来自首次创建 Credential 后的
-`RetrievePublicKeyWithDefaultBlobType()`。公钥不是秘密，但必须与
-`identity_hash`、backend、签名算法和 payload 版本一起认证保存。后续操作不得
-重新读取公钥后直接信任；如果当前 Credential 的公钥与 payload 不一致，必须返回
-`XSecError::SystemKeyInvalidated`。
-
 Windows backend 当前使用 16 字节随机 persistent challenge，与 `biometric/`
-参考实现一致。完整 envelope header 与 Windows backend header（包括密文长度）都作为
+参考实现一致。完整 envelope header 都作为
 AES-256-GCM AAD；wrapped DEK 本身由 GCM tag 认证。
 
 metadata 移到其他操作系统后，当前 backend 无法处理原 payload 时返回 `XSecError::IncompatibleSystemProtector`。调用方可使用其他 Protector 解锁，再替换 `system` 记录。
@@ -218,10 +195,6 @@ Windows Hello backend 的首次创建流程为：
 ```text
 创建或打开 KeyCredential
     ↓
-RetrievePublicKeyWithDefaultBlobType()
-    ↓
-保存公钥 blob、签名算法和 identity_hash
-    ↓
 生成持久化随机 challenge
     ↓
 RequestSignAsync(challenge)
@@ -232,18 +205,17 @@ SHA-256(signature) 后使用 HKDF-SHA-256 派生 KEK
 ```
 
 `wrap_key` 必须在 `RequestSignAsync` 返回 `Success` 并得到非空签名后才允许产生最终
-payload。Windows Hello 自己持有私钥并执行签名；XSec 不将返回的公钥 blob 重新导入
-本地 CNG，仅将公钥保存为 Credential 变更检测值。
+payload。Windows Hello 自己持有私钥并执行签名。
 
 Windows Hello 私钥不得导出到 Rust 内存。由签名派生的 KEK 只允许在一次
 wrap/unwrap 调用期间短暂存在于 Rust 内存，并必须使用 `Zeroizing` 清理。
 
 ### unwrap_key
 
-`unwrap_key` 严格解析 payload，核对 `identity_hash`、backend、公钥 blob 和签名算法，随后执行：
+`unwrap_key` 严格解析 payload，核对 envelope 和 identity hash，随后执行：
 
 ```text
-解析 XSSP payload
+解析 XSecSP payload
     ↓
 读取 payload 中的 persistent challenge
     ↓
@@ -256,8 +228,8 @@ Windows Hello 返回成功的 signature
 使用 AES-256-GCM 解包 DEK
 ```
 
-不得把签名结果直接当作 DEK。公钥 blob 仅用于检测 Credential 是否被删除后
-重新创建；Windows Hello 的签名操作本身由系统 Credential provider 执行。
+不得把签名结果直接当作 DEK。Windows Hello 的签名操作本身由系统 Credential
+provider 执行。
 
 用户验证必须约束实际的解包操作。不得先执行一个独立的认证或签名请求，再使用不受该次认证约束的另一把密钥解包。
 
@@ -265,14 +237,15 @@ Windows 实现不得另建可独立调用 `NCryptDecrypt` 的 CNG 包装密钥�
 签名经 SHA-256 和 HKDF-SHA-256 派生 KEK，使用户验证与 DEK 解包形成密码学绑定。
 `NCRYPT_UI_POLICY` 或通用 CNG 密钥保护界面不等同于 Windows Hello。
 
+XSec 不区分 key 是否已经存在于进程内存，也不实现 Bitwarden 的 AFU 临时解锁路径。
+每次 `wrap_key` 和 `unwrap_key` 都统一执行 Windows Hello `RequestSignAsync`，再派生
+KEK 并包装或解包 DEK。进程内 secure memory 属于上层调用方的职责。
+
 Windows WinRT 操作使用真正的 Rust async 等待，不在异步 API 内调用阻塞式 `.get()`。
 
 ### 兼容性
 
-当前实现写入统一 `XSSP` envelope v1，Windows backend id 为 1。此前实验版本直接
-写入的 Windows v2/v3/v4 payload 不属于稳定格式，不自动迁移；遇到这些数据时返回
-格式错误或不支持版本。调用方需要先通过其他 Protector 解锁并重新添加 system
-protector，或者明确删除旧 metadata 与旧 Credential 后重新注册。
+当前实现写入统一 `XSecSP` envelope v1。项目尚未发布，不提供旧实验 payload 的兼容或迁移；格式变化直接通过版本号拒绝，调用方需要重新注册 system protector。
 
 Windows Hello PRF 遵循 `biometric/` 参考实现：对持久化 challenge 请求签名，再对
 签名做 SHA-256。该设计依赖同一 Credential 对同一 challenge 产生稳定签名；发布前

@@ -18,17 +18,12 @@ use windows::{
 use zeroize::Zeroizing;
 
 const KIND: &str = "system";
-const MAGIC: &[u8; 4] = b"XSSP";
+const MAGIC: &[u8; 6] = b"XSecSP";
 const ENVELOPE_VERSION: u16 = 1;
-const WINDOWS_BACKEND: u16 = 1;
-const SIGNATURE_ALGORITHM: u16 = 1; // RSASSA-PKCS1-v1_5 with SHA-256
-const KDF_ALGORITHM: u16 = 1; // HKDF-SHA-256
-const AEAD_ALGORITHM: u16 = 1; // AES-256-GCM
 const KEY_SIZE: usize = 32;
 const CHALLENGE_SIZE: usize = 16;
 const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
-const MAX_PUBLIC_KEY_SIZE: usize = 16 * 1024;
 const MAX_IDENTITY_SIZE: usize = 4096;
 const CREDENTIAL_PREFIX: &str = "xsec-system-v1-";
 const KDF_INFO: &[u8] = b"xsec:windows-hello:kek:v1";
@@ -96,17 +91,15 @@ impl XSecSystemProtector {
         }
     }
 
-    fn public_key(credential: &KeyCredential) -> XSecResult<Vec<u8>> {
-        let buffer = credential
-            .RetrievePublicKeyWithDefaultBlobType()
-            .map_err(map_error)?;
-        let length = buffer.Length().map_err(map_error)? as usize;
-        if !(24..=MAX_PUBLIC_KEY_SIZE).contains(&length) {
-            return Err(XSecError::SystemKeyInvalidated);
-        }
-        let mut bytes = Array::<u8>::with_len(length);
-        CryptographicBuffer::CopyToByteArray(&buffer, &mut bytes).map_err(map_error)?;
-        Ok(bytes.to_vec())
+    /// Perform the only unlock operation used by this backend.
+    ///
+    /// The credential is opened and the challenge is signed for every call.
+    /// There is deliberately no in-process key cache or separate yes/no
+    /// authorization path: the returned signature is the input to KEK
+    /// derivation, so the Windows Hello operation directly gates decryption.
+    async fn authorize(&self, challenge: &[u8]) -> XSecResult<Zeroizing<Vec<u8>>> {
+        let credential = self.open_credential().await?;
+        Self::sign(&credential, challenge).await
     }
 
     async fn sign(credential: &KeyCredential, challenge: &[u8]) -> XSecResult<Zeroizing<Vec<u8>>> {
@@ -121,7 +114,7 @@ impl XSecSystemProtector {
         }
         let buffer = response.Result().map_err(map_error)?;
         let length = buffer.Length().map_err(map_error)? as usize;
-        if length == 0 || length > MAX_PUBLIC_KEY_SIZE {
+        if length == 0 || length > 16 * 1024 {
             return Err(XSecError::AuthenticationFailed);
         }
         let mut bytes = Array::<u8>::with_len(length);
@@ -146,39 +139,18 @@ impl XSecProtector for XSecSystemProtector {
 
     async fn wrap_key<'a>(&'a self, key: &'a SecretBox<[u8; 32]>) -> XSecResult<Vec<u8>> {
         let credential = self.create_credential().await?;
-        let public_key = Self::public_key(&credential)?;
         let mut challenge = [0u8; CHALLENGE_SIZE];
         let mut nonce = [0u8; NONCE_SIZE];
         getrandom::fill(&mut challenge).map_err(|_| XSecError::Crypto)?;
         getrandom::fill(&mut nonce).map_err(|_| XSecError::Crypto)?;
         let signature = Self::sign(&credential, &challenge).await?;
         let kek = Self::derive_kek(&signature, &self.identity_hash)?;
-        let backend_length = 6
-            + 4
-            + public_key.len()
-            + 2
-            + CHALLENGE_SIZE
-            + 1
-            + NONCE_SIZE
-            + 4
-            + KEY_SIZE
-            + TAG_SIZE;
-        let mut header = Vec::with_capacity(44 + backend_length);
+        let mut header = Vec::with_capacity(MAGIC.len() + 2 + 32 + CHALLENGE_SIZE + NONCE_SIZE);
         header.extend_from_slice(MAGIC);
         header.extend_from_slice(&ENVELOPE_VERSION.to_be_bytes());
-        header.extend_from_slice(&WINDOWS_BACKEND.to_be_bytes());
         header.extend_from_slice(&self.identity_hash);
-        header.extend_from_slice(&(backend_length as u32).to_be_bytes());
-        header.extend_from_slice(&SIGNATURE_ALGORITHM.to_be_bytes());
-        header.extend_from_slice(&KDF_ALGORITHM.to_be_bytes());
-        header.extend_from_slice(&AEAD_ALGORITHM.to_be_bytes());
-        header.extend_from_slice(&(public_key.len() as u32).to_be_bytes());
-        header.extend_from_slice(&public_key);
-        header.extend_from_slice(&(CHALLENGE_SIZE as u16).to_be_bytes());
         header.extend_from_slice(&challenge);
-        header.push(NONCE_SIZE as u8);
         header.extend_from_slice(&nonce);
-        header.extend_from_slice(&((KEY_SIZE + TAG_SIZE) as u32).to_be_bytes());
         let cipher = Aes256Gcm::new_from_slice(&kek[..]).map_err(|_| XSecError::Crypto)?;
         let nonce = Nonce::try_from(nonce.as_slice()).map_err(|_| XSecError::Crypto)?;
         let ciphertext = cipher
@@ -199,12 +171,7 @@ impl XSecProtector for XSecSystemProtector {
         if parsed.identity_hash != self.identity_hash {
             return Err(XSecError::SystemKeyInvalidated);
         }
-        let credential = self.open_credential().await?;
-        let current_public = Self::public_key(&credential)?;
-        if current_public != parsed.public_key {
-            return Err(XSecError::SystemKeyInvalidated);
-        }
-        let signature = Self::sign(&credential, parsed.challenge).await?;
+        let signature = self.authorize(parsed.challenge).await?;
         let kek = Self::derive_kek(&signature, &self.identity_hash)?;
         let cipher = Aes256Gcm::new_from_slice(&kek[..]).map_err(|_| XSecError::Crypto)?;
         let nonce = Nonce::try_from(parsed.nonce).map_err(|_| XSecError::Corrupted)?;
@@ -230,7 +197,6 @@ impl XSecProtector for XSecSystemProtector {
 
 struct SystemPayload<'a> {
     identity_hash: [u8; 32],
-    public_key: &'a [u8],
     challenge: &'a [u8],
     nonce: &'a [u8],
     header: &'a [u8],
@@ -239,76 +205,29 @@ struct SystemPayload<'a> {
 
 impl<'a> SystemPayload<'a> {
     fn parse(payload: &'a [u8]) -> XSecResult<Self> {
-        const ENVELOPE_HEADER_SIZE: usize = 44;
-        if payload.len()
-            < ENVELOPE_HEADER_SIZE
-                + 6
-                + 4
-                + 24
-                + 2
-                + CHALLENGE_SIZE
-                + 1
-                + NONCE_SIZE
-                + 4
-                + KEY_SIZE
-                + TAG_SIZE
-        {
+        const HEADER_SIZE: usize = MAGIC.len() + 2 + 32 + CHALLENGE_SIZE + NONCE_SIZE;
+        const PAYLOAD_SIZE: usize = HEADER_SIZE + KEY_SIZE + TAG_SIZE;
+        if payload.len() != PAYLOAD_SIZE {
             return Err(XSecError::Corrupted);
         }
-        if payload.get(..4) != Some(MAGIC) {
+        if payload.get(..MAGIC.len()) != Some(MAGIC) {
             return Err(XSecError::Corrupted);
         }
-        if read_u16(payload, 4)? != ENVELOPE_VERSION {
+        if read_u16(payload, MAGIC.len())? != ENVELOPE_VERSION {
             return Err(XSecError::UnsupportedVersion);
         }
-        if read_u16(payload, 6)? != WINDOWS_BACKEND {
-            return Err(XSecError::IncompatibleSystemProtector);
-        }
-        let identity_hash = payload[8..40]
+        let identity_start = MAGIC.len() + 2;
+        let identity_end = identity_start + 32;
+        let identity_hash = payload[identity_start..identity_end]
             .try_into()
             .map_err(|_| XSecError::Corrupted)?;
-        let backend_length = read_u32(payload, 40)? as usize;
-        if backend_length != payload.len() - ENVELOPE_HEADER_SIZE {
-            return Err(XSecError::Corrupted);
-        }
-        if read_u16(payload, 44)? != SIGNATURE_ALGORITHM
-            || read_u16(payload, 46)? != KDF_ALGORITHM
-            || read_u16(payload, 48)? != AEAD_ALGORITHM
-        {
-            return Err(XSecError::UnsupportedAlgorithm);
-        }
-        let public_len = read_u32(payload, 50)? as usize;
-        if !(24..=MAX_PUBLIC_KEY_SIZE).contains(&public_len) {
-            return Err(XSecError::Corrupted);
-        }
-        let public_end = 54usize
-            .checked_add(public_len)
-            .ok_or(XSecError::Corrupted)?;
-        if read_u16(payload, public_end)? as usize != CHALLENGE_SIZE {
-            return Err(XSecError::Corrupted);
-        }
-        let challenge_start = public_end + 2;
-        let challenge_end = challenge_start
-            .checked_add(CHALLENGE_SIZE)
-            .ok_or(XSecError::Corrupted)?;
-        if *payload.get(challenge_end).ok_or(XSecError::Corrupted)? as usize != NONCE_SIZE {
-            return Err(XSecError::Corrupted);
-        }
-        let nonce_start = challenge_end + 1;
-        let nonce_end = nonce_start
-            .checked_add(NONCE_SIZE)
-            .ok_or(XSecError::Corrupted)?;
-        let ciphertext_len = read_u32(payload, nonce_end)? as usize;
-        let ciphertext_start = nonce_end + 4;
-        let ciphertext_end = ciphertext_start
-            .checked_add(ciphertext_len)
-            .ok_or(XSecError::Corrupted)?;
-        if ciphertext_len != KEY_SIZE + TAG_SIZE || ciphertext_end != payload.len() {
-            return Err(XSecError::Corrupted);
-        }
+        let challenge_start = identity_end;
+        let challenge_end = challenge_start + CHALLENGE_SIZE;
+        let nonce_start = challenge_end;
+        let nonce_end = nonce_start + NONCE_SIZE;
+        let ciphertext_start = nonce_end;
         Ok(Self {
             identity_hash,
-            public_key: &payload[54..public_end],
             challenge: &payload[challenge_start..challenge_end],
             nonce: &payload[nonce_start..nonce_end],
             header: &payload[..ciphertext_start],
@@ -320,16 +239,6 @@ impl<'a> SystemPayload<'a> {
 fn read_u16(payload: &[u8], offset: usize) -> XSecResult<u16> {
     let end = offset.checked_add(2).ok_or(XSecError::Corrupted)?;
     Ok(u16::from_be_bytes(
-        payload
-            .get(offset..end)
-            .ok_or(XSecError::Corrupted)?
-            .try_into()
-            .map_err(|_| XSecError::Corrupted)?,
-    ))
-}
-fn read_u32(payload: &[u8], offset: usize) -> XSecResult<u32> {
-    let end = offset.checked_add(4).ok_or(XSecError::Corrupted)?;
-    Ok(u32::from_be_bytes(
         payload
             .get(offset..end)
             .ok_or(XSecError::Corrupted)?
@@ -420,33 +329,12 @@ mod tests {
     }
 
     fn test_payload() -> Vec<u8> {
-        let public_key = [3u8; 24];
-        let backend_length = 6
-            + 4
-            + public_key.len()
-            + 2
-            + CHALLENGE_SIZE
-            + 1
-            + NONCE_SIZE
-            + 4
-            + KEY_SIZE
-            + TAG_SIZE;
         let mut payload = Vec::new();
         payload.extend_from_slice(MAGIC);
         payload.extend_from_slice(&ENVELOPE_VERSION.to_be_bytes());
-        payload.extend_from_slice(&WINDOWS_BACKEND.to_be_bytes());
         payload.extend_from_slice(&identity_hash("test"));
-        payload.extend_from_slice(&(backend_length as u32).to_be_bytes());
-        payload.extend_from_slice(&SIGNATURE_ALGORITHM.to_be_bytes());
-        payload.extend_from_slice(&KDF_ALGORITHM.to_be_bytes());
-        payload.extend_from_slice(&AEAD_ALGORITHM.to_be_bytes());
-        payload.extend_from_slice(&(public_key.len() as u32).to_be_bytes());
-        payload.extend_from_slice(&public_key);
-        payload.extend_from_slice(&(CHALLENGE_SIZE as u16).to_be_bytes());
         payload.extend_from_slice(&[4u8; CHALLENGE_SIZE]);
-        payload.push(NONCE_SIZE as u8);
         payload.extend_from_slice(&[5u8; NONCE_SIZE]);
-        payload.extend_from_slice(&((KEY_SIZE + TAG_SIZE) as u32).to_be_bytes());
         payload.extend_from_slice(&[6u8; KEY_SIZE + TAG_SIZE]);
         payload
     }
@@ -455,7 +343,6 @@ mod tests {
     fn envelope_parser_accepts_v1_and_rejects_trailing_data() {
         let payload = test_payload();
         let parsed = SystemPayload::parse(&payload).unwrap();
-        assert_eq!(parsed.public_key, &[3u8; 24]);
         assert_eq!(parsed.challenge, &[4u8; CHALLENGE_SIZE]);
         let mut trailing = payload;
         trailing.push(0);
@@ -466,12 +353,12 @@ mod tests {
     }
 
     #[test]
-    fn envelope_parser_rejects_another_backend() {
+    fn envelope_parser_rejects_another_version() {
         let mut payload = test_payload();
-        payload[6..8].copy_from_slice(&2u16.to_be_bytes());
+        payload[MAGIC.len()..MAGIC.len() + 2].copy_from_slice(&2u16.to_be_bytes());
         assert!(matches!(
             SystemPayload::parse(&payload),
-            Err(XSecError::IncompatibleSystemProtector)
+            Err(XSecError::UnsupportedVersion)
         ));
     }
 
