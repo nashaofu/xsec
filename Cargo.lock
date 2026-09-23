@@ -773,6 +773,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "windows",
+ "windows-future",
  "zeroize",
 ]
 

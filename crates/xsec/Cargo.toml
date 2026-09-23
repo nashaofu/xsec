@@ -10,7 +10,7 @@ repository = "https://github.com/nashaofu/xsec.git"
 default = ["file-storage", "password-protector", "system-protector"]
 file-storage = ["dep:tempfile", "tokio/fs"]
 password-protector = ["dep:argon2"]
-system-protector = ["dep:windows"]
+system-protector = ["dep:windows", "dep:windows-future"]
 
 [dependencies]
 aes-gcm = { version = "0.11.1", features = ["zeroize"] }
@@ -27,6 +27,7 @@ zeroize = "1.9.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61.3", optional = true, features = ["Security_Credentials", "Security_Cryptography", "Foundation", "Storage_Streams", "Win32", "Win32_Security", "Win32_Security_Cryptography"] }
+windows-future = { version = "0.2.1", optional = true, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
@@ -39,3 +40,7 @@ required-features = ["file-storage", "password-protector"]
 [[example]]
 name = "system"
 required-features = ["file-storage", "system-protector"]
+
+[[example]]
+name = "system_bypass"
+required-features = ["system-protector"]

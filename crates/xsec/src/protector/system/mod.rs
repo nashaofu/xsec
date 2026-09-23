@@ -21,6 +21,11 @@ impl XSecSystemProtector {
         let _ = self;
         Err(crate::XSecError::SystemProtectorUnavailable)
     }
+
+    pub async fn delete(&self) -> crate::XSecResult<()> {
+        let _ = self;
+        Err(crate::XSecError::SystemProtectorUnavailable)
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -40,7 +45,7 @@ impl crate::XSecProtector for XSecSystemProtector {
         &'a self,
         _payload: &'a [u8],
     ) -> crate::XSecResult<secrecy::SecretBox<[u8; 32]>> {
-        let _ = (self, payload);
+        let _ = (self, _payload);
         Err(crate::XSecError::SystemProtectorUnavailable)
     }
 }
@@ -48,6 +53,10 @@ impl crate::XSecProtector for XSecSystemProtector {
 #[cfg(not(target_os = "windows"))]
 fn identity_hash(identity: &str) -> [u8; 32] {
     use sha2::{Digest, Sha256};
+    assert!(
+        identity.len() <= 4096,
+        "XSec system protector identity exceeds 4096 UTF-8 bytes"
+    );
     let mut h = Sha256::new();
     h.update(b"xsec:system-protector:v1");
     h.update((identity.len() as u32).to_be_bytes());
