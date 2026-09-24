@@ -90,18 +90,20 @@ pub use protector::XSecSystemProtector;
 - 调用方不需要遵守平台原生密钥的命名限制。
 - `identity` 不得包含依赖显示文案或运行时随机值等不稳定内容。
 
-实现不得直接使用原始 `identity` 作为平台密钥名称。平台密钥名称按以下方式派生：
+实现不得直接使用原始 `identity` 作为平台密钥名称。构造时先计算固定长度的内部
+`identity`，后续逻辑只使用该值：
 
 ```text
-platform_key_id =
-    hex(SHA256(
-        "xsec:system-protector:v1"
-        || u32_be(identity.length)
-        || identity
-    ))
+identity = SHA256(
+    "xsec:system-protector"
+    || u32_be(input.length)
+    || input
+)
+platform_key_id = "xsec-system-" || hex(identity)
 ```
 
-长度字段使用无符号大端编码。当前实现限制 `identity` 最多为 4096 个 UTF-8 字节，超出时构造函数会拒绝继续。metadata 和系统密钥名称中都不保存原始 `identity`。
+长度字段使用无符号大端编码。调用方传入的 `identity` 最多为 4096 个 UTF-8 字节，
+超出时构造函数会拒绝继续。metadata 和系统密钥名称中都不保存原始值。
 
 ## 平台分发
 
@@ -147,29 +149,30 @@ kind = "system"
 
 ```text
 magic                  [6 bytes] = "XSecSP"
-format_version         u16 big-endian = 1
-identity_hash          [32 bytes]
+format_version         u16 big-endian = 2
+identity               [32 bytes]
 persistent_challenge   [16 bytes]
+hkdf_salt              [32 bytes]
 nonce                  [12 bytes]
 wrapped_dek            [48 bytes] (AES-256-GCM ciphertext + tag)
 ```
 
-`identity_hash` 使用与平台密钥名称相同的长度分帧输入计算。当前 payload 是固定长度，解析器必须拒绝未知版本、字段截断和 payload 后的额外数据。
+`identity` 是构造时对调用方输入计算出的 SHA-256 值。当前 payload 是固定长度，解析器必须拒绝未知版本、字段截断和 payload 后的额外数据。
 
 AES-256-GCM 的 AAD 是从 magic 到 nonce 结束的完整 header，必须绑定以下内容的完整性：
 
 - envelope 版本。
-- `identity_hash`。
-- persistent challenge 和 nonce。
+- `identity`。
+- persistent challenge、HKDF salt 和 nonce。
 - wrapped DEK。
 
 Windows backend 当前使用 16 字节随机 persistent challenge，与 `biometric/`
-参考实现一致。完整 envelope header 都作为
-AES-256-GCM AAD；wrapped DEK 本身由 GCM tag 认证。
+参考实现一致。每次包装还会生成独立的 32 字节 HKDF salt 和 12 字节 GCM nonce。
+完整 envelope header 都作为 AES-256-GCM AAD；wrapped DEK 本身由 GCM tag 认证。
 
 metadata 移到其他操作系统后，当前 backend 无法处理原 payload 时返回 `XSecError::IncompatibleSystemProtector`。调用方可使用其他 Protector 解锁，再替换 `system` 记录。
 
-v1 的 metadata 最多保存一个 `kind = "system"` 的记录，与单设备、单写者约束保持一致。多设备同时保留多个系统保护器不在 v1 范围内。
+当前 metadata 最多保存一个 `kind = "system"` 的记录，与单设备、单写者约束保持一致。多设备同时保留多个系统保护器不在当前范围内。
 
 ## 操作语义
 
@@ -199,7 +202,9 @@ Windows Hello backend 的首次创建流程为：
     ↓
 RequestSignAsync(challenge)
     ↓
-SHA-256(signature) 后使用 HKDF-SHA-256 派生 KEK
+SHA-256(signature) 得到 PRF
+    ↓
+使用随机 salt、identity 和固定域分隔串执行 HKDF-SHA-256
     ↓
 使用 AES-256-GCM 包装 DEK
 ```
@@ -209,6 +214,20 @@ payload。Windows Hello 自己持有私钥并执行签名。
 
 Windows Hello 私钥不得导出到 Rust 内存。由签名派生的 KEK 只允许在一次
 wrap/unwrap 调用期间短暂存在于 Rust 内存，并必须使用 `Zeroizing` 清理。
+WinRT 签名数组在计算 PRF 后原地清零，不复制到普通 `Vec<u8>`。
+
+KEK 的派生规则固定为：
+
+```text
+PRF = SHA256(signature)
+KEK = HKDF-SHA256(
+    salt = hkdf_salt,
+    ikm = PRF,
+    info = "xsec:windows-hello:kek" || identity,
+)
+```
+
+算法由 envelope version 唯一确定，不在 payload 中增加可协商算法字段。
 
 ### unwrap_key
 
@@ -245,11 +264,17 @@ Windows WinRT 操作使用真正的 Rust async 等待，不在异步 API 内调�
 
 ### 兼容性
 
-当前实现写入统一 `XSecSP` envelope v1。项目尚未发布，不提供旧实验 payload 的兼容或迁移；格式变化直接通过版本号拒绝，调用方需要重新注册 system protector。
+当前实现只读写 `XSecSP` envelope v2，其他版本返回
+`XSecError::UnsupportedVersion`。
 
 Windows Hello PRF 遵循 `biometric/` 参考实现：对持久化 challenge 请求签名，再对
 签名做 SHA-256。该设计依赖同一 Credential 对同一 challenge 产生稳定签名；发布前
-必须在目标 Windows 版本上完成首次注册、进程重启后解锁以及绕过测试。
+必须在目标 Windows 版本上完成首次注册和进程重启后解锁测试。
+
+Windows envelope 编解码、KDF 和 AEAD 位于 Windows backend 内，测试覆盖 round
+trip、错误签名、错误 identity、header/ciphertext 篡改、截断、尾随数据、未知版本
+以及随机 salt/nonce。Windows Hello 的交互、签名稳定性和真实设备行为仍必须在
+Windows 真机验证。
 
 ## 错误模型
 

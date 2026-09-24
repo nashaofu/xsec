@@ -40,7 +40,3 @@ required-features = ["file-storage", "password-protector"]
 [[example]]
 name = "system"
 required-features = ["file-storage", "system-protector"]
-
-[[example]]
-name = "system_bypass"
-required-features = ["system-protector"]
