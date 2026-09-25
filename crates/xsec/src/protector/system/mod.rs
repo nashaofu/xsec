@@ -14,6 +14,12 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::XSecSystemProtector;
 
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(target_os = "macos")]
+pub use macos::XSecSystemProtector;
+
 fn hash_identity(identity: &str) -> [u8; 32] {
     assert!(
         identity.len() <= MAX_IDENTITY_SIZE,
@@ -26,16 +32,18 @@ fn hash_identity(identity: &str) -> [u8; 32] {
     hash.finalize().into()
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub struct XSecSystemProtector {
-    identity: [u8; 32],
+    _identity: [u8; 32],
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 impl XSecSystemProtector {
     pub fn new(identity: impl Into<String>) -> Self {
         let identity = hash_identity(&identity.into());
-        Self { identity }
+        Self {
+            _identity: identity,
+        }
     }
 
     pub async fn check_availability(&self) -> crate::XSecResult<()> {
@@ -49,7 +57,7 @@ impl XSecSystemProtector {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 impl crate::XSecProtector for XSecSystemProtector {
     fn kind(&self) -> &'static str {
         "system"

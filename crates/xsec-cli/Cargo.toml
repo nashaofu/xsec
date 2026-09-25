@@ -12,6 +12,7 @@ name = "xsec"
 path = "src/main.rs"
 
 [dependencies]
+base64ct = { version = "1.8.3", features = ["alloc"] }
 clap = { version = "4.5.48", features = ["derive"] }
 dotenvy = "0.15.7"
 rpassword = "7.5.4"

@@ -11,7 +11,14 @@ default = ["file-storage", "password-protector", "system-protector"]
 file-storage = ["dep:tempfile", "tokio/fs"]
 password-protector = ["dep:argon2"]
 system-protector = [
+    "dep:core-foundation",
+    "dep:futures-channel",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-local-authentication",
     "dep:secure-types",
+    "dep:security-framework",
+    "dep:security-framework-sys",
     "dep:windows",
     "dep:windows-future",
     "dep:zbus",
@@ -39,6 +46,15 @@ windows-future = { version = "0.2.1", optional = true, features = ["std"] }
 secure-types = { version = "0.5.0", optional = true }
 zbus = { version = "5.16.0", default-features = false, features = ["tokio"], optional = true }
 zbus_polkit = { version = "5.1.0", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { version = "0.10.1", optional = true }
+futures-channel = { version = "0.3.31", optional = true }
+objc2 = { version = "0.6.4", optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString", "std"], optional = true }
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["LAContext"], optional = true }
+security-framework = { version = "3.7.0", default-features = false, features = ["OSX_10_15"], optional = true }
+security-framework-sys = { version = "2.17.0", default-features = false, features = ["OSX_10_15"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -11,6 +11,7 @@
 - 平台无法满足这些条件时返回明确错误，不得降级到更弱的保护方式。
 
 持久化能力由平台决定。Windows 使用不可导出的 Windows Hello Credential 包装
+DEK；macOS 使用受 Touch ID 约束的 Secure Enclave P-256 私钥执行 ECDH 并包装
 DEK；Linux 参考 Bitwarden Desktop 的语义，只在当前 protector 实例的受保护内存中
 保存 DEK。Linux 进程退出或 protector 被重新创建后，该密钥不可恢复，
 `unwrap_key` 在完成用户验证后返回 `XSecError::SystemKeyNotFound`。
@@ -115,8 +116,8 @@ platform_key_id = "xsec-system-" || hex(identity)
 
 ```rust
 mod system {
-    #[cfg(target_vendor = "apple")]
-    mod apple;
+    #[cfg(target_os = "macos")]
+    mod macos;
 
     #[cfg(target_os = "android")]
     mod android;
@@ -128,7 +129,7 @@ mod system {
     mod windows;
 
     #[cfg(not(any(
-        target_vendor = "apple",
+        target_os = "macos",
         target_os = "android",
         target_os = "linux",
         target_os = "windows",
@@ -178,6 +179,23 @@ Windows backend 当前使用 16 字节随机 persistent challenge，与 `biometr
 参考实现一致。每次包装还会生成独立的 32 字节 HKDF salt 和 12 字节 GCM nonce。
 完整 envelope header 都作为 AES-256-GCM AAD；wrapped DEK 本身由 GCM tag 认证。
 
+macOS 使用独立的固定长度 payload：
+
+```text
+magic                  [6 bytes] = "XSecMP"
+format_version         u16 big-endian = 1
+identity               [32 bytes]
+recipient_key_hash     [32 bytes]
+ephemeral_public_key   [65 bytes]
+hkdf_salt              [32 bytes]
+nonce                  [12 bytes]
+wrapped_dek            [48 bytes] (AES-256-GCM ciphertext + tag)
+```
+
+`ephemeral_public_key` 使用 ANSI X9.63 未压缩 P-256 格式 `04 || X || Y`。
+`recipient_key_hash` 是 Secure Enclave 公钥编码的 SHA-256，用于在解包前识别系统
+密钥是否已被替换。完整 header 作为 AES-256-GCM AAD。
+
 metadata 移到其他操作系统后，当前 backend 无法处理原 payload 时返回 `XSecError::IncompatibleSystemProtector`。调用方可使用其他 Protector 解锁，再替换 `system` 记录。
 
 当前 metadata 最多保存一个 `kind = "system"` 的记录，与单设备、单写者约束保持一致。多设备同时保留多个系统保护器不在当前范围内。
@@ -194,8 +212,8 @@ key_id                 [16 bytes]
 Linux marker 只把 metadata 记录绑定到当前 identity，并标识其平台来源。实际 DEK
 只存在于当前 `XSecSystemProtector` 的受保护内存中。随机 `key_id` 将 marker
 绑定到该实例当前保存的 DEK；再次调用 `wrap_key` 会替换 DEK 并使旧 marker 返回
-`XSecError::SystemKeyInvalidated`。Windows 和 Linux parser 识别到另一平台的 magic
-时返回 `XSecError::IncompatibleSystemProtector`。
+`XSecError::SystemKeyInvalidated`。各平台 parser 识别到另一平台的 magic 时返回
+`XSecError::IncompatibleSystemProtector`。
 
 ## 操作语义
 
@@ -285,6 +303,53 @@ KEK 并包装或解包 DEK。进程内 secure memory 属于上层调用方的职
 
 Windows WinRT 操作使用真正的 Rust async 等待，不在异步 API 内调用阻塞式 `.get()`。
 
+## macOS backend
+
+macOS backend 为每个 identity 创建独立的 Secure Enclave P-256 私钥。私钥保存在
+Data Protection Keychain 中，并使用
+`kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly` 和
+`kSecAccessControlPrivateKeyUsage | kSecAccessControlBiometryCurrentSet`。
+不得使用允许系统密码或 Apple Watch 回退的 `userPresence` 策略。
+
+`wrap_key` 生成一次性软件 P-256 密钥，并使用 Secure Enclave 私钥与该一次性公钥
+执行 ECDH。包装和解包都要求用户认证，避免在生物识别集合变化后继续使用已经无法
+解锁的旧公钥生成新 payload：
+
+```text
+Secure Enclave private key + ephemeral public key
+    ↓ ECDH P-256
+shared secret
+    ↓ HKDF-SHA256
+KEK
+    ↓ AES-256-GCM
+wrapped DEK
+```
+
+`unwrap_key` 使用 payload 中的一次性公钥与 Secure Enclave 私钥执行 ECDH。该私钥
+操作由 Keychain access control 直接约束并触发 Touch ID，不能先执行独立的布尔认证
+再使用不受认证约束的解密密钥。
+
+KEK 派生规则固定为：
+
+```text
+KEK = HKDF-SHA256(
+    salt = hkdf_salt,
+    ikm = ecdh_shared_secret,
+    info = "xsec:macos-secure-enclave:kek"
+        || identity
+        || recipient_key_hash,
+)
+```
+
+原始 ECDH shared secret 和 KEK 只在单次调用期间存在，并使用 `Zeroizing` 清理。
+Security.framework 阻塞调用通过私有工作线程执行，不依赖调用方使用特定 async
+runtime。
+
+macOS Secure Enclave 需要受支持的硬件、登录用户会话、Data Protection Keychain
+以及正确签名并由 provisioning profile 授权的 application identifier。普通未签名
+CLI、`sudo` 启动的非用户上下文和 LaunchDaemon 不保证可用，且不得回退到普通
+Keychain 软件密钥。
+
 ## Linux backend
 
 Linux backend 参考 Bitwarden Desktop 的临时系统解锁模型：
@@ -330,8 +395,10 @@ polkit authentication agent。策略使用 `auth_self`，不保留跨调用授�
 
 ### 兼容性
 
-Windows 只读写 `XSecSP` envelope v2，Linux 只读写 `XSecLP` marker v1。各 backend
-对自身格式的其他版本返回 `XSecError::UnsupportedVersion`。
+Windows 只读写 `XSecSP` envelope v2，macOS 只读写 `XSecMP` envelope v1，Linux
+只读写 `XSecLP` marker v1。各 backend 对其他平台格式返回
+`XSecError::IncompatibleSystemProtector`，对自身格式的其他版本返回
+`XSecError::UnsupportedVersion`。
 
 Windows Hello PRF 遵循 `biometric/` 参考实现：对持久化 challenge 请求签名，再对
 签名做 SHA-256。该设计依赖同一 Credential 对同一 challenge 产生稳定签名；发布前
@@ -341,6 +408,11 @@ Windows envelope 编解码、KDF 和 AEAD 位于 Windows backend 内，测试覆
 trip、错误签名、错误 identity、header/ciphertext 篡改、截断、尾随数据、未知版本
 以及随机 salt/nonce。Windows Hello 的交互、签名稳定性和真实设备行为仍必须在
 Windows 真机验证。
+
+macOS envelope 编解码、KDF 和 AEAD 位于 macOS backend 内，测试覆盖 round trip、
+错误 ECDH secret、错误 identity、公钥编码、header/ciphertext 篡改、截断、尾随
+数据、未知版本和跨平台拒绝。Touch ID 对话、签名与 entitlement、Secure Enclave
+持久化和指纹集合变更行为仍必须在目标 Mac 真机验证。
 
 Linux 测试覆盖 marker 解析、identity 绑定、跨平台拒绝以及进程内密钥缺失语义。
 polkit 对话、桌面 authentication agent 和 `memfd_secret` 实际使用情况仍必须在目标

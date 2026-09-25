@@ -22,18 +22,27 @@ Cargo 包名为 `xsec-cli`，生成的可执行文件名为 `xsec`。
 cargo run -p xsec-cli --bin xsec -- init
 ```
 
-将完整的 `.env` 文档加密为 `.xsec`，再解密并注入子进程：
+将 `.env` 中的每个值分别加密到 `.xsec`，再解密并注入子进程：
 
 ```text
-cargo run -p xsec-cli --bin xsec -- env encrypt -i .env -o .xsec
+cargo run -p xsec-cli --bin xsec -- encrypt -i .env -o .xsec
 cargo run -p xsec-cli --bin xsec -- run -f .xsec -- your-command
+```
+
+读取、设置和删除单个环境变量：
+
+```text
+cargo run -p xsec-cli --bin xsec -- get API_TOKEN -f .xsec
+cargo run -p xsec-cli --bin xsec -- set API_TOKEN value -f .xsec
+printf '%s' "$API_TOKEN" | cargo run -p xsec-cli --bin xsec -- set API_TOKEN --stdin -f .xsec
+cargo run -p xsec-cli --bin xsec -- del API_TOKEN -f .xsec
 ```
 
 默认文件职责：
 
 ```text
 .env                明文输入，不应提交
-.xsec               默认环境密文
+.xsec               保留 dotenv 结构的逐值加密环境文件
 .xsec.production    生产环境密文
 .xsec.meta          被保护的 DEK 和 Protector metadata，不应提交
 ```

@@ -5,7 +5,10 @@ use std::{
 
 use secrecy::{ExposeSecret, SecretBox};
 use secure_types::SecureArray;
-use zbus::{Connection, zvariant::{OwnedValue, Str}};
+use zbus::{
+    Connection,
+    zvariant::{OwnedValue, Str},
+};
 use zbus_polkit::policykit1::{AuthorityProxy, CheckAuthorizationFlags, Subject};
 
 use super::hash_identity;
@@ -14,6 +17,7 @@ use crate::{XSecError, XSecProtector, XSecResult};
 const KIND: &str = "system";
 const MAGIC: &[u8; 6] = b"XSecLP";
 const WINDOWS_MAGIC: &[u8; 6] = b"XSecSP";
+const MACOS_MAGIC: &[u8; 6] = b"XSecMP";
 const PAYLOAD_VERSION: u16 = 1;
 const KEY_SIZE: usize = 32;
 const IDENTITY_SIZE: usize = 32;
@@ -51,7 +55,10 @@ impl XSecSystemProtector {
             .enumerate_actions("")
             .await
             .map_err(map_protector_error)?;
-        if actions.iter().any(|action| action.action_id == POLKIT_ACTION) {
+        if actions
+            .iter()
+            .any(|action| action.action_id == POLKIT_ACTION)
+        {
             Ok(())
         } else {
             Err(XSecError::SystemAuthenticationNotConfigured)
@@ -79,8 +86,7 @@ impl XSecSystemProtector {
                 subject_details: details,
             }
         } else {
-            Subject::new_for_owner(std::process::id(), None, None)
-                .map_err(map_protector_error)?
+            Subject::new_for_owner(std::process::id(), None, None).map_err(map_protector_error)?
         };
         let details = HashMap::new();
         let result = proxy
@@ -149,10 +155,7 @@ impl XSecProtector for XSecSystemProtector {
         Ok(payload)
     }
 
-    async fn unwrap_key<'a>(
-        &'a self,
-        payload: &'a [u8],
-    ) -> XSecResult<SecretBox<[u8; KEY_SIZE]>> {
+    async fn unwrap_key<'a>(&'a self, payload: &'a [u8]) -> XSecResult<SecretBox<[u8; KEY_SIZE]>> {
         let key_id = parse_payload(payload, &self.identity)?;
         self.authorize().await?;
         self.copy_key(key_id)
@@ -163,7 +166,10 @@ fn parse_payload<'a>(
     payload: &'a [u8],
     expected_identity: &[u8; IDENTITY_SIZE],
 ) -> XSecResult<&'a [u8; KEY_ID_SIZE]> {
-    if payload.get(..WINDOWS_MAGIC.len()) == Some(WINDOWS_MAGIC) {
+    if matches!(
+        payload.get(..MAGIC.len()),
+        Some(value) if value == WINDOWS_MAGIC || value == MACOS_MAGIC
+    ) {
         return Err(XSecError::IncompatibleSystemProtector);
     }
     if payload.len() != PAYLOAD_SIZE || payload.get(..MAGIC.len()) != Some(MAGIC) {
@@ -261,12 +267,12 @@ mod tests {
             Err(XSecError::SystemKeyInvalidated)
         ));
 
-        let mut windows_payload = [0; PAYLOAD_SIZE];
-        windows_payload[..WINDOWS_MAGIC.len()].copy_from_slice(WINDOWS_MAGIC);
-        assert!(matches!(
-            parse_payload(&windows_payload, &protector.identity),
-            Err(XSecError::IncompatibleSystemProtector)
-        ));
+        for platform_magic in [WINDOWS_MAGIC, MACOS_MAGIC] {
+            assert!(matches!(
+                parse_payload(platform_magic, &protector.identity),
+                Err(XSecError::IncompatibleSystemProtector)
+            ));
+        }
     }
 
     #[test]

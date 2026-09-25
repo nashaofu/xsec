@@ -2,7 +2,7 @@ use secrecy::{ExposeSecret, SecretBox};
 use std::sync::{Arc, Mutex};
 #[cfg(all(
     feature = "system-protector",
-    not(any(target_os = "linux", target_os = "windows"))
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
 ))]
 use xsec::XSecSystemProtector;
 use xsec::{XSec, XSecError, XSecProtector, XSecResult, XSecStatus, XSecStorage};
@@ -65,7 +65,7 @@ fn status_reports_empty() {
 
 #[cfg(all(
     feature = "system-protector",
-    not(any(target_os = "linux", target_os = "windows"))
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
 ))]
 #[tokio::test]
 async fn system_protector_is_explicitly_unavailable_without_a_backend() {

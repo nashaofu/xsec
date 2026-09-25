@@ -32,7 +32,7 @@ async fn main() -> XSecResult<()> {
             }
             XSecError::SystemKeyNotFound => {
                 println!(
-                    "The Linux system key expired with the previous process; unlock with another protector or recreate the example storage."
+                    "The platform system key is unavailable; unlock with another protector or recreate the example storage."
                 );
                 return Ok(());
             }

@@ -11,6 +11,7 @@ use crate::{XSecError, XSecResult};
 
 const MAGIC: &[u8; 6] = b"XSecSP";
 const LINUX_MAGIC: &[u8; 6] = b"XSecLP";
+const MACOS_MAGIC: &[u8; 6] = b"XSecMP";
 const ENVELOPE_VERSION: u16 = 2;
 const KEY_SIZE: usize = 32;
 const IDENTITY_SIZE: usize = 32;
@@ -59,7 +60,10 @@ pub(super) struct SystemEnvelope<'a> {
 
 impl<'a> SystemEnvelope<'a> {
     pub(super) fn parse(payload: &'a [u8], expected_identity: &Identity) -> XSecResult<Self> {
-        if payload.get(..LINUX_MAGIC.len()) == Some(LINUX_MAGIC) {
+        if matches!(
+            payload.get(..MAGIC.len()),
+            Some(value) if value == LINUX_MAGIC || value == MACOS_MAGIC
+        ) {
             return Err(XSecError::IncompatibleSystemProtector);
         }
         if payload.len() != PAYLOAD_SIZE {
@@ -306,12 +310,12 @@ mod tests {
             Err(XSecError::UnsupportedVersion)
         ));
 
-        let mut linux_payload = [0; MAGIC.len()];
-        linux_payload.copy_from_slice(LINUX_MAGIC);
-        assert!(matches!(
-            SystemEnvelope::parse(&linux_payload, &identity),
-            Err(XSecError::IncompatibleSystemProtector)
-        ));
+        for platform_magic in [LINUX_MAGIC, MACOS_MAGIC] {
+            assert!(matches!(
+                SystemEnvelope::parse(platform_magic, &identity),
+                Err(XSecError::IncompatibleSystemProtector)
+            ));
+        }
     }
 
     #[test]

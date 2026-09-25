@@ -1,7 +1,7 @@
 # xsec-cli
 
-`xsec-cli` encrypts complete dotenv documents with the `xsec` library and
-injects their values into child processes without creating a plaintext
+`xsec-cli` encrypts each value in a dotenv document with the `xsec` library and
+injects decrypted values into child processes without creating a plaintext
 temporary file.
 
 The Cargo package is named `xsec-cli`; the installed executable is `xsec`.
@@ -15,10 +15,12 @@ The Cargo package is named `xsec-cli`; the installed executable is `xsec`.
 .xsec.meta          protected data-encryption-key metadata; do not commit
 ```
 
-The `.xsec` file contains business ciphertext. The `.xsec.meta` file contains
-the wrapped data encryption key and protector metadata. Losing `.xsec.meta`
-makes the encrypted environment unrecoverable. Back it up and provision it
-through an appropriate secret-management channel.
+The `.xsec` file remains a dotenv document: variable names, comments, ordering,
+and blank lines stay readable, while protected values use the
+`encrypted:xsec:<base64>` format. The `.xsec.meta` file contains the wrapped
+data encryption key and protector metadata. Losing `.xsec.meta` makes the
+encrypted values unrecoverable. Back it up and provision it through an
+appropriate secret-management channel.
 
 ## Usage
 
@@ -38,18 +40,35 @@ printf '%s' "$XSEC_PASSWORD" | xsec init --password-stdin
 Encrypt and run:
 
 ```text
-xsec env encrypt -i .env -o .xsec
+xsec encrypt -i .env -o .xsec
 xsec run -f .xsec -- your-command
 ```
 
 Decrypt to standard output or an explicit file:
 
 ```text
-xsec env decrypt -i .xsec --stdout
-xsec env decrypt -i .xsec -o .env
+xsec decrypt -i .xsec --stdout
+xsec decrypt -i .xsec -o .env
 ```
 
 `--stdout` is implicit when `--output` is omitted.
+
+Read, update, or remove one value:
+
+```text
+xsec get API_TOKEN -f .xsec
+xsec set API_TOKEN value -f .xsec
+xsec set API_TOKEN -f .xsec
+printf '%s' "$API_TOKEN" | xsec set API_TOKEN --stdin -f .xsec
+xsec del API_TOKEN -f .xsec
+```
+
+`set` accepts a dotenvx-style positional value. Omit it to prompt without echo,
+or use `--stdin` to keep the value out of the process argument list and shell
+history. Standard input is stored exactly, including terminal newlines, and
+may be empty. A value cannot contain NUL or carriage-return bytes. `get` writes
+only the value, without a label or added newline. `get` and `del` exit with
+status 1 when the key is absent.
 
 On a supported platform, system protection requires a stable logical identity:
 
@@ -71,6 +90,11 @@ change the identity.
 - Output files are written atomically. New files use owner-only permissions on
   Unix platforms.
 - Passwords, plaintext values, and ciphertext are not written to diagnostics.
-
-The current format encrypts the complete dotenv document. Updating one value
-therefore requires decrypting and re-encrypting the document.
+- Every encrypted value uses a fresh nonce and is authenticated against its
+  variable name. Moving ciphertext to another key causes decryption to fail.
+- `set` replaces only the selected value. `del` removes only the selected
+  declaration. Both preserve unrelated comments, ordering, multiline values,
+  and LF or CRLF line endings.
+- Before replacing the encrypted file, mutation commands re-read it and reject
+  a detected concurrent change. A non-cooperating writer can still race in the
+  narrow interval between that comparison and the atomic replacement.
