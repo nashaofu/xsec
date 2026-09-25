@@ -2,12 +2,12 @@ use xsec::{XSec, XSecError, XSecFileStorage, XSecResult, XSecSystemProtector};
 
 #[tokio::main]
 async fn main() -> XSecResult<()> {
-    let storage = XSecFileStorage::new("target/system.xsec");
+    let storage = XSecFileStorage::new("target/system.xsec.meta");
     let protector = XSecSystemProtector::new("xsec-example-system");
 
     if std::env::args().any(|arg| arg == "--delete") {
         protector.delete().await?;
-        println!("Deleted the Windows Hello credential.");
+        println!("Deleted the system protector key.");
         return Ok(());
     }
 
@@ -23,9 +23,16 @@ async fn main() -> XSecResult<()> {
         match error {
             XSecError::WindowsHelloNotSupported
             | XSecError::WindowsHelloNotConfigured
+            | XSecError::SystemAuthenticationNotConfigured
             | XSecError::SystemProtectorUnavailable => {
                 println!(
-                    "System protector is unavailable: configure Windows Hello for the current user before running this example."
+                    "System protector is unavailable: configure the platform authentication service before running this example."
+                );
+                return Ok(());
+            }
+            XSecError::SystemKeyNotFound => {
+                println!(
+                    "The Linux system key expired with the previous process; unlock with another protector or recreate the example storage."
                 );
                 return Ok(());
             }

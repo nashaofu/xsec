@@ -1,20 +1,41 @@
+use sha2::{Digest, Sha256};
+
+const MAX_IDENTITY_SIZE: usize = 4096;
+
 #[cfg(target_os = "windows")]
 mod windows;
 
 #[cfg(target_os = "windows")]
 pub use windows::XSecSystemProtector;
 
-#[cfg(not(target_os = "windows"))]
-pub struct XSecSystemProtector {
-    identity_hash: [u8; 32],
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "linux")]
+pub use linux::XSecSystemProtector;
+
+fn hash_identity(identity: &str) -> [u8; 32] {
+    assert!(
+        identity.len() <= MAX_IDENTITY_SIZE,
+        "XSec system protector identity exceeds 4096 UTF-8 bytes"
+    );
+    let mut hash = Sha256::new();
+    hash.update(b"xsec:system-protector");
+    hash.update((identity.len() as u32).to_be_bytes());
+    hash.update(identity.as_bytes());
+    hash.finalize().into()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub struct XSecSystemProtector {
+    identity: [u8; 32],
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl XSecSystemProtector {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            identity_hash: identity_hash(&name.into()),
-        }
+    pub fn new(identity: impl Into<String>) -> Self {
+        let identity = hash_identity(&identity.into());
+        Self { identity }
     }
 
     pub async fn check_availability(&self) -> crate::XSecResult<()> {
@@ -28,7 +49,7 @@ impl XSecSystemProtector {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl crate::XSecProtector for XSecSystemProtector {
     fn kind(&self) -> &'static str {
         "system"
@@ -48,18 +69,4 @@ impl crate::XSecProtector for XSecSystemProtector {
         let _ = (self, _payload);
         Err(crate::XSecError::SystemProtectorUnavailable)
     }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn identity_hash(identity: &str) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    assert!(
-        identity.len() <= 4096,
-        "XSec system protector identity exceeds 4096 UTF-8 bytes"
-    );
-    let mut h = Sha256::new();
-    h.update(b"xsec:system-protector:v1");
-    h.update((identity.len() as u32).to_be_bytes());
-    h.update(identity.as_bytes());
-    h.finalize().into()
 }
