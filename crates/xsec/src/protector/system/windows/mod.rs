@@ -65,12 +65,11 @@ impl XSecSystemProtector {
         match result.Status().map_err(map_error)? {
             KeyCredentialStatus::Success => result.Credential().map_err(map_error),
             KeyCredentialStatus::CredentialAlreadyExists => self.open_credential().await,
-            status => Err(map_credential_status(status, Operation::Create)),
+            status => Err(map_credential_status(status)),
         }
     }
 
     async fn open_credential(&self) -> XSecResult<KeyCredential> {
-        require_hello().await?;
         let result = KeyCredentialManager::OpenAsync(&HSTRING::from(&self.credential_name))
             .map_err(map_error)?
             .await
@@ -78,7 +77,7 @@ impl XSecSystemProtector {
         match result.Status().map_err(map_error)? {
             KeyCredentialStatus::Success => result.Credential().map_err(map_error),
             KeyCredentialStatus::NotFound => Err(XSecError::SystemKeyNotFound),
-            status => Err(map_credential_status(status, Operation::Open)),
+            status => Err(map_credential_status(status)),
         }
     }
 
@@ -89,6 +88,7 @@ impl XSecSystemProtector {
     /// authorization path: the returned signature is the input to KEK
     /// derivation, so the Windows Hello operation directly gates decryption.
     async fn authorize(&self, challenge: &[u8]) -> XSecResult<WindowsHelloPrf> {
+        require_hello().await?;
         let credential = self.open_credential().await?;
         Self::sign(&credential, challenge).await
     }
@@ -101,7 +101,7 @@ impl XSecSystemProtector {
         let response = operation.await.map_err(map_error)?;
         match response.Status().map_err(map_error)? {
             KeyCredentialStatus::Success => {}
-            status => return Err(map_credential_status(status, Operation::Sign)),
+            status => return Err(map_credential_status(status)),
         }
         let buffer = response.Result().map_err(map_error)?;
         let length = buffer.Length().map_err(map_error)? as usize;
@@ -163,25 +163,12 @@ async fn require_hello() -> XSecResult<()> {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Operation {
-    Open,
-    Create,
-    Sign,
-}
-
-fn map_credential_status(status: KeyCredentialStatus, operation: Operation) -> XSecError {
+fn map_credential_status(status: KeyCredentialStatus) -> XSecError {
     match status {
         KeyCredentialStatus::UserCanceled => XSecError::AuthenticationCancelled,
         KeyCredentialStatus::UserPrefersPassword => XSecError::UserVerificationRequired,
         KeyCredentialStatus::SecurityDeviceLocked => XSecError::AuthenticationFailed,
-        KeyCredentialStatus::CredentialAlreadyExists => {
-            if matches!(operation, Operation::Create) {
-                XSecError::SystemKeyInvalidated
-            } else {
-                XSecError::WindowsHelloNotConfigured
-            }
-        }
+        KeyCredentialStatus::CredentialAlreadyExists => XSecError::WindowsHelloNotConfigured,
         KeyCredentialStatus::NotFound => XSecError::SystemKeyNotFound,
         KeyCredentialStatus::UnknownError => XSecError::WindowsHelloNotConfigured,
         _ => XSecError::Crypto,

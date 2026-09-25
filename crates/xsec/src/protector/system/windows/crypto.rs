@@ -165,12 +165,9 @@ fn derive_kek(
     salt: &[u8],
     identity: &Identity,
 ) -> XSecResult<Zeroizing<[u8; KEY_SIZE]>> {
-    let mut info = Vec::with_capacity(KDF_INFO.len() + identity.len());
-    info.extend_from_slice(KDF_INFO);
-    info.extend_from_slice(identity);
     let mut kek = Zeroizing::new([0; KEY_SIZE]);
     Hkdf::<Sha256>::new(Some(salt), &prf.0[..])
-        .expand(&info, kek.as_mut())
+        .expand_multi_info(&[KDF_INFO, identity], kek.as_mut())
         .map_err(|_| XSecError::Crypto)?;
     Ok(kek)
 }
