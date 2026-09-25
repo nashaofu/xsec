@@ -556,7 +556,7 @@ use xsec::{
 };
 
 async fn run() -> XSecResult<()> {
-    let storage = XSecFileStorage::new("data/account.xsec");
+    let storage = XSecFileStorage::new("data/account.xsec.meta");
     let password = SecretBox::new(Box::new(b"correct horse battery staple".to_vec()));
     let protector = XSecPasswordProtector::new(password);
 

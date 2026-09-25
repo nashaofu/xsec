@@ -8,6 +8,12 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::XSecSystemProtector;
 
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "linux")]
+pub use linux::XSecSystemProtector;
+
 fn hash_identity(identity: &str) -> [u8; 32] {
     assert!(
         identity.len() <= MAX_IDENTITY_SIZE,
@@ -20,12 +26,12 @@ fn hash_identity(identity: &str) -> [u8; 32] {
     hash.finalize().into()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub struct XSecSystemProtector {
     identity: [u8; 32],
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl XSecSystemProtector {
     pub fn new(identity: impl Into<String>) -> Self {
         let identity = hash_identity(&identity.into());
@@ -43,7 +49,7 @@ impl XSecSystemProtector {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl crate::XSecProtector for XSecSystemProtector {
     fn kind(&self) -> &'static str {
         "system"

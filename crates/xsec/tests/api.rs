@@ -1,6 +1,9 @@
 use secrecy::{ExposeSecret, SecretBox};
 use std::sync::{Arc, Mutex};
-#[cfg(all(feature = "system-protector", not(target_os = "windows")))]
+#[cfg(all(
+    feature = "system-protector",
+    not(any(target_os = "linux", target_os = "windows"))
+))]
 use xsec::XSecSystemProtector;
 use xsec::{XSec, XSecError, XSecProtector, XSecResult, XSecStatus, XSecStorage};
 #[derive(Clone, Default)]
@@ -60,7 +63,10 @@ fn status_reports_empty() {
     assert_eq!(xsec.status(), XSecStatus::Empty);
 }
 
-#[cfg(all(feature = "system-protector", not(target_os = "windows")))]
+#[cfg(all(
+    feature = "system-protector",
+    not(any(target_os = "linux", target_os = "windows"))
+))]
 #[tokio::test]
 async fn system_protector_is_explicitly_unavailable_without_a_backend() {
     let protector = XSecSystemProtector::new("stable-storage-id");
