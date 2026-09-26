@@ -57,6 +57,23 @@ async fn lifecycle() {
     assert_eq!(y.decrypt_with_aad(&c, b"id").unwrap().as_slice(), b"hello");
 }
 
+#[cfg(feature = "system-protector")]
+#[tokio::test]
+async fn unlock_system_requires_a_configured_system_protector() {
+    let storage = Mem::default();
+    let mut initialized = XSec::new();
+    initialized.load(storage.clone()).await.unwrap();
+    initialized.create(&P("test", 7)).await.unwrap();
+
+    let mut locked = XSec::new();
+    locked.load(storage).await.unwrap();
+
+    assert!(matches!(
+        locked.unlock_system().await,
+        Err(XSecError::ProtectorNotFound)
+    ));
+}
+
 #[test]
 fn status_reports_empty() {
     let xsec: XSec<Mem> = XSec::new();

@@ -22,7 +22,11 @@ use security_framework::{
 };
 use security_framework_sys::{
     access_control::{kSecAccessControlBiometryCurrentSet, kSecAccessControlPrivateKeyUsage},
-    base::{SecKeyRef, errSecAuthFailed, errSecDuplicateItem, errSecItemNotFound, errSecSuccess},
+    base::{
+        SecKeyRef, errSecAuthFailed as ERR_SEC_AUTH_FAILED,
+        errSecDuplicateItem as ERR_SEC_DUPLICATE_ITEM,
+        errSecItemNotFound as ERR_SEC_ITEM_NOT_FOUND, errSecSuccess as ERR_SEC_SUCCESS,
+    },
     item::{
         kSecAttrAccessControl, kSecAttrIsPermanent, kSecAttrKeyClass, kSecAttrKeyClassPrivate,
         kSecAttrKeyClassPublic, kSecAttrKeySizeInBits, kSecAttrKeyType,
@@ -79,6 +83,15 @@ pub struct XSecSystemProtector {
 impl XSecSystemProtector {
     pub fn new(identity: impl Into<String>) -> Self {
         let identity = hash_identity(&identity.into());
+        Self::from_identity(identity)
+    }
+
+    pub(crate) fn from_payload(payload: &[u8]) -> XSecResult<Self> {
+        let identity = *MacosEnvelope::parse_stored(payload)?.identity();
+        Ok(Self::from_identity(identity))
+    }
+
+    fn from_identity(identity: Identity) -> Self {
         Self {
             key_tag: format!("{KEY_PREFIX}{}", hex(&identity)).into_bytes(),
             identity,
@@ -107,7 +120,7 @@ impl XSecSystemProtector {
                         .downcast_ref::<MacosError>()
                         .is_some_and(|error| error.code == ERR_SEC_PARAM) =>
                 {
-                    return Err(XSecError::ProviderNotSupported);
+                    return Err(XSecError::SystemProtectorUnavailable);
                 }
                 Err(error) => return Err(error),
             };
@@ -176,7 +189,12 @@ impl XSecProtector for XSecSystemProtector {
         let identity = self.identity;
 
         run_blocking(move || {
-            let private_key = open_private_key(&key_tag)?;
+            let private_key = match open_private_key(&key_tag) {
+                Err(XSecError::SystemKeyNotFound) => {
+                    return Err(XSecError::SystemKeyInvalidated);
+                }
+                result => result?,
+            };
             let public_key = private_key.public_key().ok_or(XSecError::Crypto)?;
             let actual_key_hash: [u8; 32] = Sha256::digest(export_public_key(&public_key)?).into();
             if actual_key_hash != recipient_key_hash {
@@ -202,7 +220,7 @@ fn open_or_create_private_key(key_tag: &[u8]) -> XSecResult<SecKey> {
             Err(XSecError::Protector { source })
                 if source
                     .downcast_ref::<MacosError>()
-                    .is_some_and(|error| error.code == errSecDuplicateItem) =>
+                    .is_some_and(|error| error.code == ERR_SEC_DUPLICATE_ITEM) =>
             {
                 open_private_key(key_tag)
             }
@@ -281,6 +299,7 @@ fn create_software_private_key() -> XSecResult<SecKey> {
 
 fn open_private_key(key_tag: &[u8]) -> XSecResult<SecKey> {
     let tag = CFData::from_buffer(key_tag);
+    let key_size = CFNumber::from(256);
     let mut query = CFMutableDictionary::from_CFType_pairs(&[
         (
             unsafe { kSecClass }.to_void(),
@@ -293,6 +312,14 @@ fn open_private_key(key_tag: &[u8]) -> XSecResult<SecKey> {
         (
             unsafe { kSecAttrKeyType }.to_void(),
             unsafe { kSecAttrKeyTypeECSECPrimeRandom }.to_void(),
+        ),
+        (
+            unsafe { kSecAttrKeySizeInBits }.to_void(),
+            key_size.to_void(),
+        ),
+        (
+            unsafe { kSecAttrTokenID }.to_void(),
+            unsafe { kSecAttrTokenIDSecureEnclave }.to_void(),
         ),
         (unsafe { kSecAttrApplicationTag }.to_void(), tag.to_void()),
         (
@@ -318,7 +345,7 @@ fn open_private_key(key_tag: &[u8]) -> XSecResult<SecKey> {
 
     let mut result: CFTypeRef = ptr::null();
     let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result) };
-    if status != errSecSuccess {
+    if status != ERR_SEC_SUCCESS {
         return Err(map_status(status));
     }
     if result.is_null() {
@@ -333,10 +360,27 @@ fn authentication_context() -> Retained<LAContext> {
 
 fn delete_keys(key_tag: &[u8]) -> XSecResult<()> {
     let tag = CFData::from_buffer(key_tag);
+    let key_size = CFNumber::from(256);
     let query = CFMutableDictionary::from_CFType_pairs(&[
         (
             unsafe { kSecClass }.to_void(),
             unsafe { kSecClassKey }.to_void(),
+        ),
+        (
+            unsafe { kSecAttrKeyClass }.to_void(),
+            unsafe { kSecAttrKeyClassPrivate }.to_void(),
+        ),
+        (
+            unsafe { kSecAttrKeyType }.to_void(),
+            unsafe { kSecAttrKeyTypeECSECPrimeRandom }.to_void(),
+        ),
+        (
+            unsafe { kSecAttrKeySizeInBits }.to_void(),
+            key_size.to_void(),
+        ),
+        (
+            unsafe { kSecAttrTokenID }.to_void(),
+            unsafe { kSecAttrTokenIDSecureEnclave }.to_void(),
         ),
         (unsafe { kSecAttrApplicationTag }.to_void(), tag.to_void()),
         (
@@ -345,7 +389,7 @@ fn delete_keys(key_tag: &[u8]) -> XSecResult<()> {
         ),
     ]);
     match unsafe { SecItemDelete(query.as_concrete_TypeRef()) } {
-        errSecSuccess | errSecItemNotFound => Ok(()),
+        ERR_SEC_SUCCESS | ERR_SEC_ITEM_NOT_FOUND => Ok(()),
         status => Err(map_status(status)),
     }
 }
@@ -480,8 +524,8 @@ fn map_cf_error(error: CFError) -> XSecError {
 
     match code {
         ERR_SEC_USER_CANCELED => XSecError::AuthenticationCancelled,
-        errSecAuthFailed => XSecError::AuthenticationFailed,
-        errSecItemNotFound => XSecError::SystemKeyNotFound,
+        ERR_SEC_AUTH_FAILED => XSecError::AuthenticationFailed,
+        ERR_SEC_ITEM_NOT_FOUND => XSecError::SystemKeyNotFound,
         ERR_SEC_INTERACTION_NOT_ALLOWED => XSecError::UserVerificationRequired,
         ERR_SEC_MISSING_ENTITLEMENT | ERR_SEC_NOT_AVAILABLE => {
             XSecError::SystemProtectorUnavailable
@@ -497,8 +541,8 @@ fn map_security_error(error: security_framework::base::Error) -> XSecError {
 fn map_status(status: i32) -> XSecError {
     match status {
         ERR_SEC_USER_CANCELED => XSecError::AuthenticationCancelled,
-        errSecAuthFailed => XSecError::AuthenticationFailed,
-        errSecItemNotFound => XSecError::SystemKeyNotFound,
+        ERR_SEC_AUTH_FAILED => XSecError::AuthenticationFailed,
+        ERR_SEC_ITEM_NOT_FOUND => XSecError::SystemKeyNotFound,
         ERR_SEC_INTERACTION_NOT_ALLOWED => XSecError::UserVerificationRequired,
         ERR_SEC_MISSING_ENTITLEMENT | ERR_SEC_NOT_AVAILABLE => {
             XSecError::SystemProtectorUnavailable

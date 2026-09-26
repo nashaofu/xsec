@@ -24,7 +24,7 @@ const HEADER_SIZE: usize =
     MAGIC.len() + 2 + IDENTITY_SIZE + CHALLENGE_SIZE + SALT_SIZE + NONCE_SIZE;
 const PAYLOAD_SIZE: usize = HEADER_SIZE + KEY_SIZE + TAG_SIZE;
 
-type Identity = [u8; IDENTITY_SIZE];
+pub(super) type Identity = [u8; IDENTITY_SIZE];
 
 pub(super) struct Challenge([u8; CHALLENGE_SIZE]);
 
@@ -60,6 +60,14 @@ pub(super) struct SystemEnvelope<'a> {
 
 impl<'a> SystemEnvelope<'a> {
     pub(super) fn parse(payload: &'a [u8], expected_identity: &Identity) -> XSecResult<Self> {
+        Self::parse_inner(payload, Some(expected_identity))
+    }
+
+    pub(super) fn parse_stored(payload: &'a [u8]) -> XSecResult<Self> {
+        Self::parse_inner(payload, None)
+    }
+
+    fn parse_inner(payload: &'a [u8], expected_identity: Option<&Identity>) -> XSecResult<Self> {
         if matches!(
             payload.get(..MAGIC.len()),
             Some(value) if value == LINUX_MAGIC || value == MACOS_MAGIC
@@ -83,7 +91,7 @@ impl<'a> SystemEnvelope<'a> {
             .ok_or(XSecError::Corrupted)?
             .try_into()
             .map_err(|_| XSecError::Corrupted)?;
-        if identity != expected_identity {
+        if expected_identity.is_some_and(|expected| identity != expected) {
             return Err(XSecError::SystemKeyInvalidated);
         }
 
@@ -102,6 +110,10 @@ impl<'a> SystemEnvelope<'a> {
             header: &payload[..HEADER_SIZE],
             ciphertext: &payload[HEADER_SIZE..],
         })
+    }
+
+    pub(super) fn identity(&self) -> &Identity {
+        self.identity
     }
 
     pub(super) fn challenge(&self) -> &[u8] {
@@ -220,9 +232,11 @@ mod tests {
         let (key, identity, challenge, prf) = fixture();
         let payload = seal_key(&key, &identity, &challenge, &prf).unwrap();
         let envelope = SystemEnvelope::parse(&payload, &identity).unwrap();
+        let stored_envelope = SystemEnvelope::parse_stored(&payload).unwrap();
         let opened = envelope.open(&prf).unwrap();
 
         assert_eq!(opened.expose_secret(), key.expose_secret());
+        assert_eq!(stored_envelope.identity(), &identity);
         assert_eq!(envelope.challenge(), challenge.as_bytes());
     }
 

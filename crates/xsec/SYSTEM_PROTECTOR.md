@@ -67,6 +67,11 @@ impl XSecSystemProtector {
     pub async fn delete(&self) -> XSecResult<()>;
 }
 
+impl<S: XSecStorage> XSec<S> {
+    /// 从已加载的 system protector payload 恢复 identity 并解锁。
+    pub async fn unlock_system(&mut self) -> XSecResult<()>;
+}
+
 impl XSecProtector for XSecSystemProtector {
     fn kind(&self) -> &'static str {
         "system"
@@ -89,7 +94,8 @@ pub use protector::XSecSystemProtector;
 
 `identity` 是当前 XSec Storage 对应的稳定逻辑身份：
 
-- 相同 Storage 必须始终使用相同 `identity`。
+- 创建 Storage 时必须提供稳定且唯一的 `identity`。
+- 后续解锁从 system protector payload 恢复 identity 哈希，不再要求调用方提供原始值。
 - 不同 Storage 应使用不同 `identity`。
 - `identity` 不是用户身份、认证凭据或秘密。
 - 调用方不需要遵守平台原生密钥的命名限制。
@@ -272,7 +278,11 @@ KEK = HKDF-SHA256(
 
 ### unwrap_key
 
-`unwrap_key` 严格解析 payload，核对 envelope 和 identity hash，随后执行：
+显式构造的 Protector 在 `unwrap_key` 中严格解析 payload，并核对 envelope 和
+identity hash。`XSec::unlock_system` 从同一 payload 恢复 identity hash，构造平台
+Protector 后复用相同的解包和 metadata MAC 校验流程。
+
+Windows 随后执行：
 
 ```text
 解析 XSecSP payload
@@ -349,6 +359,16 @@ macOS Secure Enclave 需要受支持的硬件、登录用户会话、Data Protec
 以及正确签名并由 provisioning profile 授权的 application identifier。普通未签名
 CLI、`sudo` 启动的非用户上下文和 LaunchDaemon 不保证可用，且不得回退到普通
 Keychain 软件密钥。
+
+宿主可执行文件必须使用包含 `com.apple.application-identifier` entitlement 的
+provisioning profile 完成签名。`cargo run` 生成的 ad-hoc 签名二进制不满足该条件；
+库无法在运行时为宿主补充 entitlement。缺少授权或 Secure Enclave 不可用时返回
+`XSecError::SystemProtectorUnavailable`。
+
+解包已有 macOS payload 时，如果对应的 Secure Enclave 私钥已删除或因访问控制策略
+失效而无法再被 Keychain 找到，返回 `XSecError::SystemKeyInvalidated`。系统明确返回
+的认证失败仍保留为 `XSecError::AuthenticationFailed`，避免根据不可区分的状态码
+猜测指纹集合是否发生变化。
 
 ## Linux backend
 
@@ -444,13 +464,13 @@ let protector = XSecSystemProtector::new(
 protector.check_availability().await?;
 
 if xsec.is_initialized() {
-    xsec.unlock(&protector).await?;
+    xsec.unlock_system().await?;
 } else {
     xsec.create(&protector).await?;
 }
 ```
 
-示例中的 `identity` 只展示结构，不要求使用反向域名格式。业务应从稳定、非敏感且能唯一标识当前 Storage 的数据生成 `identity`。
+示例中的 `identity` 只在创建时使用，也只展示结构，不要求使用反向域名格式。业务应从稳定、非敏感且能唯一标识当前 Storage 的数据生成 `identity`。
 
 ## 暂不纳入
 

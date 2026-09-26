@@ -3,7 +3,7 @@ use xsec::{XSec, XSecFileStorage, XSecPasswordProtector, XSecResult};
 
 #[tokio::main]
 async fn main() -> XSecResult<()> {
-    let storage = XSecFileStorage::new("target/example.xsec.meta");
+    let storage = XSecFileStorage::new("target/example.xsec.keys");
     let password = SecretBox::new(Box::new(b"correct horse battery staple".to_vec()));
     let protector = XSecPasswordProtector::new(password);
 

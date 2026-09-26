@@ -160,6 +160,9 @@ impl<S: XSecStorage> XSec<S> {
         protector: &P,
     ) -> XSecResult<()>;
 
+    #[cfg(feature = "system-protector")]
+    pub async fn unlock_system(&mut self) -> XSecResult<()>;
+
     pub fn lock(&mut self) -> XSecResult<()>;
 }
 ```
@@ -167,6 +170,8 @@ impl<S: XSecStorage> XSec<S> {
 `is_loaded` 在 `Empty` 时返回 `false`，其余状态返回 `true`。`is_initialized` 只在 `Locked` 和 `Unlocked` 时返回 `true`。`is_locked` 在除 `Unlocked` 外的所有状态返回 `true`。
 
 `unlock` 只允许在 `Locked` 状态调用。它根据 `protector.kind()` 查找保护器记录，恢复 DEK，验证原始 metadata MAC，并在全部成功后进入 `Unlocked { storage, metadata, key }`。未初始化返回 `XSecError::NotInitialized`，认证失败返回 `XSecError::AuthenticationFailed`，已解锁时重复调用返回 `XSecError::AlreadyUnlocked`。
+
+`unlock_system` 从 system protector payload 恢复初始化时保存的 identity 哈希，创建当前平台的系统保护器后执行相同的解锁和 metadata MAC 校验。调用方不需要再次提供原始 identity。
 
 `lock` 将 `Unlocked { storage, metadata, key }` 转换为 `Locked { storage, metadata }` 并清除 DEK。`Uninitialized`、`Locked` 和 `Destroyed` 状态调用时幂等成功；`Empty` 状态返回 `XSecError::StorageNotLoaded`。
 
@@ -556,7 +561,7 @@ use xsec::{
 };
 
 async fn run() -> XSecResult<()> {
-    let storage = XSecFileStorage::new("data/account.xsec.meta");
+    let storage = XSecFileStorage::new("data/account.xsec.keys");
     let password = SecretBox::new(Box::new(b"correct horse battery staple".to_vec()));
     let protector = XSecPasswordProtector::new(password);
 

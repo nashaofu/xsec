@@ -29,7 +29,7 @@ pub enum XSecError {
     ProviderNotSupported,
     #[error("user verification is required")]
     UserVerificationRequired,
-    #[error("system protector is unavailable on this platform")]
+    #[error("system protector is unavailable")]
     SystemProtectorUnavailable,
     #[error("system authentication is not configured")]
     SystemAuthenticationNotConfigured,

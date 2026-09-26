@@ -46,6 +46,10 @@ impl XSecSystemProtector {
         }
     }
 
+    pub(crate) fn from_payload(_payload: &[u8]) -> crate::XSecResult<Self> {
+        Err(crate::XSecError::SystemProtectorUnavailable)
+    }
+
     pub async fn check_availability(&self) -> crate::XSecResult<()> {
         let _ = self;
         Err(crate::XSecError::SystemProtectorUnavailable)

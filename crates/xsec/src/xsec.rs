@@ -140,6 +140,27 @@ impl<S: XSecStorage> XSec<S> {
             }
         }
     }
+
+    /// Unlocks with the configured system protector using its stored identity.
+    #[cfg(feature = "system-protector")]
+    pub async fn unlock_system(&mut self) -> XSecResult<()> {
+        let protector = match &self.state {
+            State::Locked(_, metadata) => {
+                let record = metadata
+                    .protectors
+                    .iter()
+                    .find(|record| record.kind == "system")
+                    .ok_or(XSecError::ProtectorNotFound)?;
+                crate::XSecSystemProtector::from_payload(&record.payload)?
+            }
+            State::Empty => return Err(XSecError::StorageNotLoaded),
+            State::Uninitialized(_) => return Err(XSecError::NotInitialized),
+            State::Unlocked(..) => return Err(XSecError::AlreadyUnlocked),
+            State::Destroyed(_) => return Err(XSecError::Destroyed),
+        };
+        self.unlock(&protector).await
+    }
+
     pub fn lock(&mut self) -> XSecResult<()> {
         match std::mem::replace(&mut self.state, State::Empty) {
             State::Unlocked(s, m, _) => {

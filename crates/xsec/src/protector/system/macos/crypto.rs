@@ -41,6 +41,14 @@ pub(super) struct MacosEnvelope<'a> {
 
 impl<'a> MacosEnvelope<'a> {
     pub(super) fn parse(payload: &'a [u8], expected_identity: &Identity) -> XSecResult<Self> {
+        Self::parse_inner(payload, Some(expected_identity))
+    }
+
+    pub(super) fn parse_stored(payload: &'a [u8]) -> XSecResult<Self> {
+        Self::parse_inner(payload, None)
+    }
+
+    fn parse_inner(payload: &'a [u8], expected_identity: Option<&Identity>) -> XSecResult<Self> {
         if matches!(
             payload.get(..MAGIC.len()),
             Some(value) if value == WINDOWS_MAGIC || value == LINUX_MAGIC
@@ -60,7 +68,7 @@ impl<'a> MacosEnvelope<'a> {
         let identity_start = MAGIC.len() + 2;
         let identity_end = identity_start + IDENTITY_SIZE;
         let identity = array(payload, identity_start)?;
-        if identity != expected_identity {
+        if expected_identity.is_some_and(|expected| identity != expected) {
             return Err(XSecError::SystemKeyInvalidated);
         }
 
@@ -71,7 +79,6 @@ impl<'a> MacosEnvelope<'a> {
         let salt_start = public_key_end;
         let salt_end = salt_start + SALT_SIZE;
         let nonce_start = salt_end;
-        let nonce_end = nonce_start + NONCE_SIZE;
         let ephemeral_public_key = array(payload, public_key_start)?;
         if ephemeral_public_key[0] != 4 {
             return Err(XSecError::Corrupted);
@@ -86,6 +93,10 @@ impl<'a> MacosEnvelope<'a> {
             header: &payload[..HEADER_SIZE],
             ciphertext: &payload[HEADER_SIZE..],
         })
+    }
+
+    pub(super) fn identity(&self) -> &Identity {
+        self.identity
     }
 
     pub(super) fn recipient_key_hash(&self) -> &[u8; KEY_HASH_SIZE] {
@@ -227,10 +238,12 @@ mod tests {
         let (key, identity, key_hash, public_key, shared_secret) = fixture();
         let payload = seal_key(&key, &identity, &key_hash, &public_key, &shared_secret).unwrap();
         let envelope = MacosEnvelope::parse(&payload, &identity).unwrap();
+        let stored_envelope = MacosEnvelope::parse_stored(&payload).unwrap();
         let opened = envelope.open(&shared_secret).unwrap();
 
         assert_eq!(payload.len(), PAYLOAD_SIZE);
         assert_eq!(opened.expose_secret(), key.expose_secret());
+        assert_eq!(stored_envelope.identity(), &identity);
         assert_eq!(envelope.recipient_key_hash(), &key_hash);
         assert_eq!(envelope.ephemeral_public_key(), &public_key);
     }

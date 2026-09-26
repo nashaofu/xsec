@@ -1,6 +1,6 @@
 mod crypto;
 
-use self::crypto::{Challenge, SystemEnvelope, WindowsHelloPrf};
+use self::crypto::{Challenge, Identity, SystemEnvelope, WindowsHelloPrf};
 use super::hash_identity;
 use crate::{XSecError, XSecProtector, XSecResult};
 use secrecy::SecretBox;
@@ -27,6 +27,15 @@ pub struct XSecSystemProtector {
 impl XSecSystemProtector {
     pub fn new(identity: impl Into<String>) -> Self {
         let identity = hash_identity(&identity.into());
+        Self::from_identity(identity)
+    }
+
+    pub(crate) fn from_payload(payload: &[u8]) -> XSecResult<Self> {
+        let identity = *SystemEnvelope::parse_stored(payload)?.identity();
+        Ok(Self::from_identity(identity))
+    }
+
+    fn from_identity(identity: Identity) -> Self {
         Self {
             credential_name: format!("{CREDENTIAL_PREFIX}{}", hex(&identity)),
             identity,

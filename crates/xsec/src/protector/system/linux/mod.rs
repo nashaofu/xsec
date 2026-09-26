@@ -37,8 +37,17 @@ pub struct XSecSystemProtector {
 
 impl XSecSystemProtector {
     pub fn new(identity: impl Into<String>) -> Self {
+        Self::from_identity(hash_identity(&identity.into()))
+    }
+
+    pub(crate) fn from_payload(payload: &[u8]) -> XSecResult<Self> {
+        let (identity, _) = parse_stored_payload(payload)?;
+        Ok(Self::from_identity(*identity))
+    }
+
+    fn from_identity(identity: [u8; IDENTITY_SIZE]) -> Self {
         Self {
-            identity: hash_identity(&identity.into()),
+            identity,
             key: Mutex::new(None),
         }
     }
@@ -166,6 +175,14 @@ fn parse_payload<'a>(
     payload: &'a [u8],
     expected_identity: &[u8; IDENTITY_SIZE],
 ) -> XSecResult<&'a [u8; KEY_ID_SIZE]> {
+    let (identity, key_id) = parse_stored_payload(payload)?;
+    if identity != expected_identity {
+        return Err(XSecError::SystemKeyInvalidated);
+    }
+    Ok(key_id)
+}
+
+fn parse_stored_payload(payload: &[u8]) -> XSecResult<(&[u8; IDENTITY_SIZE], &[u8; KEY_ID_SIZE])> {
     if matches!(
         payload.get(..MAGIC.len()),
         Some(value) if value == WINDOWS_MAGIC || value == MACOS_MAGIC
@@ -184,12 +201,13 @@ fn parse_payload<'a>(
         return Err(XSecError::UnsupportedVersion);
     }
     let identity_end = MAGIC.len() + 2 + IDENTITY_SIZE;
-    if payload[MAGIC.len() + 2..identity_end] != expected_identity[..] {
-        return Err(XSecError::SystemKeyInvalidated);
-    }
-    payload[identity_end..]
+    let identity = payload[MAGIC.len() + 2..identity_end]
         .try_into()
-        .map_err(|_| XSecError::Corrupted)
+        .map_err(|_| XSecError::Corrupted)?;
+    let key_id = payload[identity_end..]
+        .try_into()
+        .map_err(|_| XSecError::Corrupted)?;
+    Ok((identity, key_id))
 }
 
 fn map_secure_memory_error(error: secure_types::Error) -> XSecError {
@@ -213,8 +231,10 @@ mod tests {
         let protector = XSecSystemProtector::new("test-account");
         let key = SecretBox::new(Box::new([7; KEY_SIZE]));
         let payload = protector.wrap_key(&key).await.unwrap();
+        let restored = XSecSystemProtector::from_payload(&payload).unwrap();
 
         assert_eq!(payload.len(), PAYLOAD_SIZE);
+        assert_eq!(restored.identity, protector.identity);
         assert!(parse_payload(&payload, &protector.identity).is_ok());
         let key_id = parse_payload(&payload, &protector.identity).unwrap();
         assert_eq!(
