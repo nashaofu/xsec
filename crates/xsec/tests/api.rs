@@ -71,7 +71,10 @@ async fn replaces_the_only_key_protector() {
 
     let mut reloaded = XSec::new();
     reloaded.load(storage).await.unwrap();
-    assert!(reloaded.unlock(&old).await.is_err());
+    assert!(matches!(
+        reloaded.unlock(&old).await,
+        Err(XSecError::Corrupted)
+    ));
     reloaded.unlock(&new).await.unwrap();
     assert_eq!(reloaded.decrypt(&ciphertext).unwrap().as_slice(), b"secret");
 }
