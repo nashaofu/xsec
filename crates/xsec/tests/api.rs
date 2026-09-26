@@ -57,6 +57,47 @@ async fn lifecycle() {
     assert_eq!(y.decrypt_with_aad(&c, b"id").unwrap().as_slice(), b"hello");
 }
 
+#[tokio::test]
+async fn replaces_the_only_key_protector() {
+    let storage = Mem::default();
+    let old = P("password", 7);
+    let new = P("password", 11);
+    let mut xsec = XSec::new();
+    xsec.load(storage.clone()).await.unwrap();
+    xsec.create(&old).await.unwrap();
+    let ciphertext = xsec.encrypt(b"secret").unwrap();
+
+    xsec.replace_key_protector("password", &new).await.unwrap();
+
+    let mut reloaded = XSec::new();
+    reloaded.load(storage).await.unwrap();
+    assert!(reloaded.unlock(&old).await.is_err());
+    reloaded.unlock(&new).await.unwrap();
+    assert_eq!(reloaded.decrypt(&ciphertext).unwrap().as_slice(), b"secret");
+}
+
+#[tokio::test]
+async fn replace_key_protector_rejects_an_occupied_kind() {
+    let storage = Mem::default();
+    let password = P("password", 7);
+    let system = P("system", 11);
+    let mut xsec = XSec::new();
+    xsec.load(storage).await.unwrap();
+    xsec.create(&password).await.unwrap();
+    xsec.add_key_protector(&system).await.unwrap();
+
+    assert!(matches!(
+        xsec.replace_key_protector("password", &P("system", 13))
+            .await,
+        Err(XSecError::ProtectorAlreadyExists)
+    ));
+    assert_eq!(xsec.status(), XSecStatus::Unlocked);
+    assert_eq!(
+        xsec.key_protector_kinds().collect::<Vec<_>>(),
+        vec!["password", "system"]
+    );
+}
+
 #[cfg(feature = "system-protector")]
 #[tokio::test]
 async fn unlock_system_requires_a_configured_system_protector() {

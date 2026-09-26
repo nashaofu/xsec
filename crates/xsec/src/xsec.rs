@@ -254,6 +254,52 @@ impl<S: XSecStorage> XSec<S> {
             }
         }
     }
+    pub async fn replace_key_protector<P: XSecProtector>(
+        &mut self,
+        kind: &str,
+        p: &P,
+    ) -> XSecResult<()> {
+        let (s, m, k) = match std::mem::replace(&mut self.state, State::Empty) {
+            State::Unlocked(s, m, k) => (s, m, k),
+            x => {
+                self.state = x;
+                return Err(XSecError::Locked);
+            }
+        };
+        let Some(index) = m.protectors.iter().position(|record| record.kind == kind) else {
+            self.state = State::Unlocked(s, m, k);
+            return Err(XSecError::ProtectorNotFound);
+        };
+        if p.kind() != kind && m.protectors.iter().any(|record| record.kind == p.kind()) {
+            self.state = State::Unlocked(s, m, k);
+            return Err(XSecError::ProtectorAlreadyExists);
+        }
+
+        let result = async {
+            validate_kind(p.kind())?;
+            let payload = p.wrap_key(&k).await?;
+            let mut next = m.clone();
+            next.protectors[index] = ProtectorRecord {
+                kind: p.kind().into(),
+                payload,
+            };
+            let bytes = next.encode(&k)?;
+            s.save(&bytes).await?;
+            Ok(next)
+        }
+        .await;
+
+        match result {
+            Ok(next) => {
+                self.state = State::Unlocked(s, next, k);
+                Ok(())
+            }
+            Err(error) => {
+                self.state = State::Unlocked(s, m, k);
+                Err(error)
+            }
+        }
+    }
     pub async fn remove_key_protector(&mut self, kind: &str) -> XSecResult<()> {
         let (s, m, k) = match std::mem::replace(&mut self.state, State::Empty) {
             State::Unlocked(s, m, k) => (s, m, k),
