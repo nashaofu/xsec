@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use tokio::io::AsyncWriteExt;
 
 use crate::{
@@ -34,11 +36,16 @@ pub(super) async fn execute(args: GetArgs) -> CliResult<u8> {
             return Err(error);
         }
     };
+    let is_terminal = std::io::stdout().is_terminal();
     let mut stdout = tokio::io::stdout();
-    let result = match stdout.write_all(&value).await {
-        Ok(()) => stdout.flush().await,
-        Err(error) => Err(error),
-    };
+    let result = async {
+        stdout.write_all(&value).await?;
+        if is_terminal {
+            stdout.write_all(b"\n").await?;
+        }
+        stdout.flush().await
+    }
+    .await;
     zeroize_environment(&mut environment);
     result.map_err(|source| io_error("failed to write environment value", source))?;
     Ok(0)

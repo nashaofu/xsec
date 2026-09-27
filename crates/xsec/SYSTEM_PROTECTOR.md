@@ -172,7 +172,15 @@ nonce                  [12 bytes]
 wrapped_dek            [48 bytes] (AES-256-GCM ciphertext + tag)
 ```
 
-`identity` 是构造时对调用方输入计算出的 SHA-256 值。当前 payload 是固定长度，解析器必须拒绝未知版本、字段截断和 payload 后的额外数据。
+Windows v2 payload 固定为 148 字节：
+
+```text
+6 + 2 + 32 + 16 + 32 + 12 + 48 = 148 bytes
+```
+
+`identity` 是构造时对调用方输入计算出的 SHA-256 值。解析器必须拒绝未知版本、
+字段截断和 payload 后的额外数据。148 字节格式是 Windows v2 的正式格式，不兼容
+未包含 `hkdf_salt` 的 116 字节草案。
 
 AES-256-GCM 的 AAD 是从 magic 到 nonce 结束的完整 header，必须绑定以下内容的完整性：
 
@@ -273,6 +281,9 @@ KEK = HKDF-SHA256(
     info = "xsec:windows-hello:kek" || identity,
 )
 ```
+
+`hkdf_salt` 每次包装时随机生成并随 envelope 保存，不要求保密。`identity` 通过
+HKDF info 绑定当前 Storage，并与域隔离字符串共同参与 KEK 派生。
 
 算法由 envelope version 唯一确定，不在 payload 中增加可协商算法字段。
 
@@ -415,8 +426,8 @@ polkit authentication agent。策略使用 `auth_self`，不保留跨调用授�
 
 ### 兼容性
 
-Windows 只读写 `XSecSP` envelope v2，macOS 只读写 `XSecMP` envelope v1，Linux
-只读写 `XSecLP` marker v1。各 backend 对其他平台格式返回
+Windows 只读写固定 148 字节的 `XSecSP` envelope v2，macOS 只读写 `XSecMP`
+envelope v1，Linux 只读写 `XSecLP` marker v1。各 backend 对其他平台格式返回
 `XSecError::IncompatibleSystemProtector`，对自身格式的其他版本返回
 `XSecError::UnsupportedVersion`。
 
