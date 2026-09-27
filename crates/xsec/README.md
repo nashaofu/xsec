@@ -13,7 +13,8 @@ XSec 是一个跨平台数据加密库。它生成并管理数据加密密钥（
 - Metadata 使用 `XSecMD` 标识，业务密文使用 `XSecCT` 标识
 - 可扩展的异步 `XSecStorage` 和 `XSecProtector`
 - 敏感密钥与解密结果使用 `SecretBox` / `Zeroizing`
-- `file-storage` 默认 feature 提供单 blob 原子文件存储
+- `file-storage` 默认 feature 提供单 blob 原子文件存储，并在 Storage 生命周期内持有独占文件锁
+- Storage 后端错误统一归一化为 `XSecStorageError`，不向核心层暴露具体 I/O 错误
 - `password-protector` 默认 feature 提供 Argon2id 密码保护器
 
 `XSecStorage` 和 `XSecProtector` 只定义抽象接口。具体实现位于对应子模块，并通过 feature 按需编译：`storage/file.rs`、`protector/password.rs`。

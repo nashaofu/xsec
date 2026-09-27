@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::storage::XSecStorageError;
+
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum XSecError {
@@ -55,10 +57,8 @@ pub enum XSecError {
     ProtectorAlreadyExists,
     #[error("the last key protector cannot be removed")]
     LastProtector,
-    #[error("storage error: {source}")]
-    Storage {
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
+    #[error(transparent)]
+    Storage(#[from] XSecStorageError),
     #[error("key protector error: {source}")]
     Protector {
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -68,16 +68,6 @@ pub enum XSecError {
 }
 
 impl XSecError {
-    #[cfg(feature = "file-storage")]
-    pub(crate) fn storage<E>(source: E) -> Self
-    where
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        Self::Storage {
-            source: Box::new(source),
-        }
-    }
-
     #[cfg(feature = "password-protector")]
     pub(crate) fn protector<E>(source: E) -> Self
     where

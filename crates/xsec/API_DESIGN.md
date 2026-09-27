@@ -53,7 +53,7 @@ pub use error::{XSecError, XSecResult};
 pub use protector::XSecProtector;
 #[cfg(feature = "password-protector")]
 pub use protector::XSecPasswordProtector;
-pub use storage::XSecStorage;
+pub use storage::{XSecStorage, XSecStorageError, XSecStorageResult};
 pub use xsec::XSec;
 ```
 
@@ -270,23 +270,26 @@ pub trait XSecStorage: Send + Sync {
     fn load(
         &self,
     ) -> impl Future<
-        Output = XSecResult<Option<Vec<u8>>>,
+        Output = XSecStorageResult<Option<Vec<u8>>>,
     > + Send + '_;
 
     fn save<'a>(
         &'a self,
         data: &'a [u8],
     ) -> impl Future<
-        Output = XSecResult<()>,
+        Output = XSecStorageResult<()>,
     > + Send + 'a;
 
     fn delete(
         &self,
     ) -> impl Future<
-        Output = XSecResult<()>,
+        Output = XSecStorageResult<()>,
     > + Send + '_;
 }
 ```
+
+Storage 只能返回 `XSecStorageError` 定义的稳定类别，不得返回 `XSecError`，也不得将
+底层文件系统、数据库或网络客户端的具体错误类型暴露给 XSec 核心层。
 
 ### load
 
@@ -294,7 +297,8 @@ pub trait XSecStorage: Send + Sync {
 
 - 从未创建过 XSec 数据时返回 `Ok(None)`。
 - 数据存在时返回完整 blob。
-- 网络、权限或设备错误返回 `XSecError::Storage`。
+- 操作冲突、访问拒绝、资源耗尽、暂时不可用和存储限制分别归一化为对应的
+  `XSecStorageError`。
 - Storage 不负责判断 blob 是否损坏。
 
 ### save
@@ -311,7 +315,13 @@ pub trait XSecStorage: Send + Sync {
 
 `delete` 删除完整 blob。目标不存在时也返回成功，保证重试安全。
 
-第一版不处理多个客户端同时写入同一个持久化对象。调用方或服务端必须保证单写者语义。
+`XSecFileStorage` 在第一次执行 `load`、`save` 或 `delete` 时，通过同目录的
+`<metadata path>.lock` 文件获取非阻塞独占锁。锁由 Storage 持有，直到 Storage
+被释放；冲突时返回 `XSecStorageError::Conflict`。锁文件不得在解锁时删除，否则等待
+或持锁进程可能分别锁住不同的文件对象。
+
+文件锁只协调遵守同一协议的进程，不能阻止绕过 `XSecFileStorage` 直接修改文件。
+其他 Storage 实现仍由调用方或服务端保证单写者语义。
 
 ## XSecProtector
 
@@ -497,9 +507,7 @@ pub enum XSecError {
     ProtectorNotFound,
     ProtectorAlreadyExists,
     LastProtector,
-    Storage {
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
+    Storage(XSecStorageError),
     Protector {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -507,9 +515,26 @@ pub enum XSecError {
 }
 
 pub type XSecResult<T> = std::result::Result<T, XSecError>;
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum XSecStorageError {
+    Conflict,
+    AccessDenied,
+    ResourceExhausted,
+    Unavailable,
+    LimitExceeded,
+    Internal,
+}
+
+pub type XSecStorageResult<T> = std::result::Result<T, XSecStorageError>;
 ```
 
 `XSecError` 使用 `#[non_exhaustive]`，允许后续增加错误类型。外部依赖的具体错误不直接成为公开 enum 成员，避免依赖升级改变 XSec 的公共 API。
+
+`XSec` 通过 `XSecError::Storage` 透明包装归一化后的 `XSecStorageError`，不识别具体
+storage 后端错误。`LimitExceeded` 表示 blob 超出 storage 契约或大小限制；blob
+已成功读取但 metadata 格式或认证无效时，由核心层返回 `XSecError::Corrupted`。
 
 认证失败不暴露底层密码校验、系统认证或密文校验细节。损坏数据与尚未初始化必须使用不同错误。
 

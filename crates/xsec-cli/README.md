@@ -13,6 +13,7 @@ The Cargo package is named `xsec-cli`; the installed executable is `xsec`.
 .xsec               encrypted default environment
 .xsec.production    encrypted production environment
 .xsec.keys          protected data-encryption-key storage; do not commit
+.xsec.keys.lock     exclusive storage lock; do not commit
 ```
 
 The `.xsec` file remains a dotenv document: variable names, comments, ordering,

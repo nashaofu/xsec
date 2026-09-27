@@ -49,39 +49,30 @@ impl<S: XSecStorage> XSec<S> {
         Ok(())
     }
     pub async fn create<P: XSecProtector>(&mut self, p: &P) -> XSecResult<()> {
-        let storage = match std::mem::replace(&mut self.state, State::Empty) {
-            State::Uninitialized(s) => s,
-            State::Empty => return Err(XSecError::StorageNotLoaded),
-            s => {
-                self.state = s;
-                return Err(XSecError::AlreadyExists);
-            }
-        };
-        let result = async {
+        let (metadata, key) = {
+            let storage = match &self.state {
+                State::Uninitialized(storage) => storage,
+                State::Empty => return Err(XSecError::StorageNotLoaded),
+                _ => return Err(XSecError::AlreadyExists),
+            };
             validate_kind(p.kind())?;
             let mut raw = Zeroizing::new([0; 32]);
             fill(raw.as_mut()).map_err(|_| XSecError::Crypto)?;
             let key = SecretBox::new(Box::new(*raw));
             let payload = p.wrap_key(&key).await?;
-            let mut m = Metadata::new(vec![ProtectorRecord {
+            let mut metadata = Metadata::new(vec![ProtectorRecord {
                 kind: p.kind().into(),
                 payload,
             }]);
-            let b = m.encode(&key)?;
-            storage.save(&b).await?;
-            Ok((m, key))
-        }
-        .await;
-        match result {
-            Ok((m, k)) => {
-                self.state = State::Unlocked(storage, m, k);
-                Ok(())
-            }
-            Err(e) => {
-                self.state = State::Uninitialized(storage);
-                Err(e)
-            }
-        }
+            let bytes = metadata.encode(&key)?;
+            storage.save(&bytes).await?;
+            (metadata, key)
+        };
+        let State::Uninitialized(storage) = std::mem::replace(&mut self.state, State::Empty) else {
+            unreachable!();
+        };
+        self.state = State::Unlocked(storage, metadata, key);
+        Ok(())
     }
     pub fn is_loaded(&self) -> bool {
         !matches!(self.state, State::Empty)
@@ -105,40 +96,29 @@ impl<S: XSecStorage> XSec<S> {
         }
     }
     pub async fn unlock<P: XSecProtector>(&mut self, p: &P) -> XSecResult<()> {
-        let (s, m) = match std::mem::replace(&mut self.state, State::Empty) {
-            State::Locked(s, m) => (s, m),
-            x => {
-                self.state = x;
-                return match &self.state {
-                    State::Empty => Err(XSecError::StorageNotLoaded),
-                    State::Uninitialized(_) => Err(XSecError::NotInitialized),
-                    State::Unlocked(..) => Err(XSecError::AlreadyUnlocked),
-                    State::Destroyed(_) => Err(XSecError::Destroyed),
-                    State::Locked(..) => unreachable!(),
-                };
-            }
-        };
-        let r = async {
-            let rec = m
+        let key = {
+            let metadata = match &self.state {
+                State::Locked(_, metadata) => metadata,
+                State::Empty => return Err(XSecError::StorageNotLoaded),
+                State::Uninitialized(_) => return Err(XSecError::NotInitialized),
+                State::Unlocked(..) => return Err(XSecError::AlreadyUnlocked),
+                State::Destroyed(_) => return Err(XSecError::Destroyed),
+            };
+            let record = metadata
                 .protectors
                 .iter()
-                .find(|r| r.kind == p.kind())
+                .find(|record| record.kind == p.kind())
                 .ok_or(XSecError::ProtectorNotFound)?;
-            let k = p.unwrap_key(&rec.payload).await?;
-            m.verify(&k)?;
-            Ok(k)
-        }
-        .await;
-        match r {
-            Ok(k) => {
-                self.state = State::Unlocked(s, m, k);
-                Ok(())
-            }
-            Err(e) => {
-                self.state = State::Locked(s, m);
-                Err(e)
-            }
-        }
+            let key = p.unwrap_key(&record.payload).await?;
+            metadata.verify(&key)?;
+            key
+        };
+        let State::Locked(storage, metadata) = std::mem::replace(&mut self.state, State::Empty)
+        else {
+            unreachable!();
+        };
+        self.state = State::Unlocked(storage, metadata, key);
+        Ok(())
     }
 
     /// Unlocks with the configured system protector using its stored identity.
@@ -225,125 +205,118 @@ impl<S: XSecStorage> XSec<S> {
         }
     }
     pub async fn add_key_protector<P: XSecProtector>(&mut self, p: &P) -> XSecResult<()> {
-        let (s, m, k) = match std::mem::replace(&mut self.state, State::Empty) {
-            State::Unlocked(s, m, k) => (s, m, k),
-            x => {
-                self.state = x;
-                return Err(XSecError::Locked);
+        let next = {
+            let (storage, metadata, key) = match &self.state {
+                State::Unlocked(storage, metadata, key) => (storage, metadata, key),
+                _ => return Err(XSecError::Locked),
+            };
+            validate_kind(p.kind())?;
+            if metadata
+                .protectors
+                .iter()
+                .any(|record| record.kind == p.kind())
+            {
+                return Err(XSecError::ProtectorAlreadyExists);
             }
+            let payload = p.wrap_key(key).await?;
+            let mut next = metadata.clone();
+            next.protectors.push(ProtectorRecord {
+                kind: p.kind().into(),
+                payload,
+            });
+            let bytes = next.encode(key)?;
+            storage.save(&bytes).await?;
+            next
         };
-        if m.protectors.iter().any(|r| r.kind == p.kind()) {
-            self.state = State::Unlocked(s, m, k);
-            return Err(XSecError::ProtectorAlreadyExists);
-        }
-        let payload = p.wrap_key(&k).await?;
-        let mut n = m.clone();
-        n.protectors.push(ProtectorRecord {
-            kind: p.kind().into(),
-            payload,
-        });
-        let b = n.encode(&k)?;
-        match s.save(&b).await {
-            Ok(()) => {
-                self.state = State::Unlocked(s, n, k);
-                Ok(())
-            }
-            Err(e) => {
-                self.state = State::Unlocked(s, m, k);
-                Err(e)
-            }
-        }
+        let State::Unlocked(_, metadata, _) = &mut self.state else {
+            unreachable!();
+        };
+        *metadata = next;
+        Ok(())
     }
     pub async fn replace_key_protector<P: XSecProtector>(
         &mut self,
         kind: &str,
         p: &P,
     ) -> XSecResult<()> {
-        let (s, m, k) = match std::mem::replace(&mut self.state, State::Empty) {
-            State::Unlocked(s, m, k) => (s, m, k),
-            x => {
-                self.state = x;
-                return Err(XSecError::Locked);
+        let next = {
+            let (storage, metadata, key) = match &self.state {
+                State::Unlocked(storage, metadata, key) => (storage, metadata, key),
+                _ => return Err(XSecError::Locked),
+            };
+            let Some(index) = metadata
+                .protectors
+                .iter()
+                .position(|record| record.kind == kind)
+            else {
+                return Err(XSecError::ProtectorNotFound);
+            };
+            if p.kind() != kind
+                && metadata
+                    .protectors
+                    .iter()
+                    .any(|record| record.kind == p.kind())
+            {
+                return Err(XSecError::ProtectorAlreadyExists);
             }
-        };
-        let Some(index) = m.protectors.iter().position(|record| record.kind == kind) else {
-            self.state = State::Unlocked(s, m, k);
-            return Err(XSecError::ProtectorNotFound);
-        };
-        if p.kind() != kind && m.protectors.iter().any(|record| record.kind == p.kind()) {
-            self.state = State::Unlocked(s, m, k);
-            return Err(XSecError::ProtectorAlreadyExists);
-        }
-
-        let result = async {
             validate_kind(p.kind())?;
-            let payload = p.wrap_key(&k).await?;
-            let mut next = m.clone();
+            let payload = p.wrap_key(key).await?;
+            let mut next = metadata.clone();
             next.protectors[index] = ProtectorRecord {
                 kind: p.kind().into(),
                 payload,
             };
-            let bytes = next.encode(&k)?;
-            s.save(&bytes).await?;
-            Ok(next)
-        }
-        .await;
-
-        match result {
-            Ok(next) => {
-                self.state = State::Unlocked(s, next, k);
-                Ok(())
-            }
-            Err(error) => {
-                self.state = State::Unlocked(s, m, k);
-                Err(error)
-            }
-        }
+            let bytes = next.encode(key)?;
+            storage.save(&bytes).await?;
+            next
+        };
+        let State::Unlocked(_, metadata, _) = &mut self.state else {
+            unreachable!();
+        };
+        *metadata = next;
+        Ok(())
     }
     pub async fn remove_key_protector(&mut self, kind: &str) -> XSecResult<()> {
-        let (s, m, k) = match std::mem::replace(&mut self.state, State::Empty) {
-            State::Unlocked(s, m, k) => (s, m, k),
-            x => {
-                self.state = x;
-                return Err(XSecError::Locked);
+        let next = {
+            let (storage, metadata, key) = match &self.state {
+                State::Unlocked(storage, metadata, key) => (storage, metadata, key),
+                _ => return Err(XSecError::Locked),
+            };
+            if !metadata.protectors.iter().any(|record| record.kind == kind) {
+                return Err(XSecError::ProtectorNotFound);
             }
+            if metadata.protectors.len() == 1 {
+                return Err(XSecError::LastProtector);
+            }
+            let mut next = metadata.clone();
+            next.protectors.retain(|record| record.kind != kind);
+            let bytes = next.encode(key)?;
+            storage.save(&bytes).await?;
+            next
         };
-        if !m.protectors.iter().any(|r| r.kind == kind) {
-            self.state = State::Unlocked(s, m, k);
-            return Err(XSecError::ProtectorNotFound);
-        }
-        if m.protectors.len() == 1 {
-            self.state = State::Unlocked(s, m, k);
-            return Err(XSecError::LastProtector);
-        }
-        let mut n = m.clone();
-        n.protectors.retain(|r| r.kind != kind);
-        let b = n.encode(&k)?;
-        match s.save(&b).await {
-            Ok(()) => {
-                self.state = State::Unlocked(s, n, k);
-                Ok(())
-            }
-            Err(e) => {
-                self.state = State::Unlocked(s, m, k);
-                Err(e)
-            }
-        }
+        let State::Unlocked(_, metadata, _) = &mut self.state else {
+            unreachable!();
+        };
+        *metadata = next;
+        Ok(())
     }
     pub async fn destroy(&mut self) -> XSecResult<()> {
-        let x = std::mem::replace(&mut self.state, State::Empty);
-        match x {
-            State::Empty => Err(XSecError::StorageNotLoaded),
-            State::Destroyed(s) => {
-                self.state = State::Destroyed(s);
-                Ok(())
-            }
-            State::Uninitialized(s) | State::Locked(s, _) | State::Unlocked(s, _, _) => {
-                s.delete().await?;
-                self.state = State::Destroyed(s);
-                Ok(())
-            }
+        match &self.state {
+            State::Empty => return Err(XSecError::StorageNotLoaded),
+            State::Destroyed(_) => return Ok(()),
+            State::Uninitialized(storage)
+            | State::Locked(storage, _)
+            | State::Unlocked(storage, _, _) => storage.delete().await?,
         }
+        let previous = std::mem::replace(&mut self.state, State::Empty);
+        let storage = match previous {
+            State::Uninitialized(storage)
+            | State::Locked(storage, _)
+            | State::Unlocked(storage, _, _) => storage,
+            State::Empty | State::Destroyed(_) => unreachable!(),
+        };
+        self.state = State::Destroyed(storage);
+        Ok(())
     }
     pub fn into_storage(self) -> Option<S> {
         match self.state {
