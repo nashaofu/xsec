@@ -7,8 +7,9 @@ use zeroize::Zeroizing;
 
 use crate::{
     cli::{
-        AddSystemProtectorArgs, Cli, Command, DelArgs, InitArgs, InspectArgs, ProtectorAddCommand,
-        ProtectorArgs, ProtectorCommand, ProtectorKind, RemoveProtectorArgs, RunArgs, SetArgs,
+        AddSystemProtectorArgs, Cli, Command, DelArgs, InitArgs, InspectArgs, ProtectorAddArgs,
+        ProtectorAddCommand, ProtectorArgs, ProtectorCommand, ProtectorKind, RemoveProtectorArgs,
+        RunArgs, SetArgs,
     },
     environment::{
         ENCRYPTED_VALUE_PREFIX, EnvDocument, decrypt_environment_document,
