@@ -1,4 +1,4 @@
-use xsec::{XSec, XSecError, XSecFileStorage, XSecResult, XSecSystemProtector};
+use xsec::{XSec, XSecError, XSecFileStorage, XSecProtectorError, XSecResult, XSecSystemProtector};
 
 #[tokio::main]
 async fn main() -> XSecResult<()> {
@@ -22,16 +22,17 @@ async fn main() -> XSecResult<()> {
     };
     if let Err(error) = result {
         match error {
-            XSecError::WindowsHelloNotSupported
-            | XSecError::WindowsHelloNotConfigured
-            | XSecError::SystemAuthenticationNotConfigured
-            | XSecError::SystemProtectorUnavailable => {
+            XSecError::Protector(
+                XSecProtectorError::Unsupported
+                | XSecProtectorError::NotConfigured
+                | XSecProtectorError::Unavailable,
+            ) => {
                 println!(
                     "System protector is unavailable: configure the platform authentication service before running this example."
                 );
                 return Ok(());
             }
-            XSecError::SystemKeyNotFound => {
+            XSecError::Protector(XSecProtectorError::KeyNotFound) => {
                 println!(
                     "The platform system key is unavailable; unlock with another protector or recreate the example storage."
                 );

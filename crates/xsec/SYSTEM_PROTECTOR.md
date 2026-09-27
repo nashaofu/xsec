@@ -14,7 +14,7 @@
 DEK；macOS 使用受 Touch ID 约束的 Secure Enclave P-256 私钥执行 ECDH 并包装
 DEK；Linux 参考 Bitwarden Desktop 的语义，只在当前 protector 实例的受保护内存中
 保存 DEK。Linux 进程退出或 protector 被重新创建后，该密钥不可恢复，
-`unwrap_key` 在完成用户验证后返回 `XSecError::SystemKeyNotFound`。
+`unwrap_key` 在完成用户验证后返回 `XSecProtectorError::KeyNotFound`。
 
 密码回退由调用方通过 `XSecPasswordProtector` 单独配置，`XSecSystemProtector` 不自动切换保护器。
 
@@ -30,14 +30,14 @@ pub trait XSecProtector: Send + Sync {
         &'a self,
         key: &'a SecretBox<[u8; 32]>,
     ) -> impl Future<
-        Output = XSecResult<Vec<u8>>,
+        Output = XSecProtectorResult<Vec<u8>>,
     > + Send + 'a;
 
     fn unwrap_key<'a>(
         &'a self,
         payload: &'a [u8],
     ) -> impl Future<
-        Output = XSecResult<SecretBox<[u8; 32]>>,
+        Output = XSecProtectorResult<SecretBox<[u8; 32]>>,
     > + Send + 'a;
 }
 ```
@@ -59,12 +59,12 @@ impl XSecSystemProtector {
     /// backend 可创建并立即释放非持久化探测密钥。
     pub async fn check_availability(
         &self,
-    ) -> XSecResult<()>;
+    ) -> XSecProtectorResult<()>;
 
     /// 删除该 identity 对应的系统密钥。
     ///
     /// 删除是幂等的；对象不存在时返回成功。
-    pub async fn delete(&self) -> XSecResult<()>;
+    pub async fn delete(&self) -> XSecProtectorResult<()>;
 }
 
 impl<S: XSecStorage> XSec<S> {
@@ -148,7 +148,7 @@ mod system {
 
 各平台依赖必须放在对应的 Cargo target dependency 下。`system-protector` 是唯一公开 feature，调用方不选择具体 backend。
 
-不支持的平台仍可构造 `XSecSystemProtector`，但 `check_availability`、`wrap_key` 和 `unwrap_key` 必须返回 `XSecError::SystemProtectorUnavailable`。不得使用 `XSecError::Crypto` 表示平台不支持。
+不支持的平台仍可构造 `XSecSystemProtector`，但 `check_availability`、`wrap_key` 和 `unwrap_key` 必须返回 `XSecProtectorError::Unavailable`。不得使用 `XSecProtectorError::Internal` 表示平台不支持。
 
 移动平台需要宿主运行时或 UI context 时，由平台绑定层在 crate 内部处理。原生 Activity、窗口句柄和认证对象不得进入公共 API。
 
@@ -210,7 +210,7 @@ wrapped_dek            [48 bytes] (AES-256-GCM ciphertext + tag)
 `recipient_key_hash` 是 Secure Enclave 公钥编码的 SHA-256，用于在解包前识别系统
 密钥是否已被替换。完整 header 作为 AES-256-GCM AAD。
 
-metadata 移到其他操作系统后，当前 backend 无法处理原 payload 时返回 `XSecError::IncompatibleSystemProtector`。调用方可使用其他 Protector 解锁，再替换 `system` 记录。
+metadata 移到其他操作系统后，当前 backend 无法处理原 payload 时返回 `XSecProtectorError::Incompatible`。调用方可使用其他 Protector 解锁，再替换 `system` 记录。
 
 当前 metadata 最多保存一个 `kind = "system"` 的记录，与单设备、单写者约束保持一致。多设备同时保留多个系统保护器不在当前范围内。
 
@@ -226,8 +226,8 @@ key_id                 [16 bytes]
 Linux marker 只把 metadata 记录绑定到当前 identity，并标识其平台来源。实际 DEK
 只存在于当前 `XSecSystemProtector` 的受保护内存中。随机 `key_id` 将 marker
 绑定到该实例当前保存的 DEK；再次调用 `wrap_key` 会替换 DEK 并使旧 marker 返回
-`XSecError::SystemKeyInvalidated`。各平台 parser 识别到另一平台的 magic 时返回
-`XSecError::IncompatibleSystemProtector`。
+`XSecProtectorError::KeyInvalidated`。各平台 parser 识别到另一平台的 magic 时返回
+`XSecProtectorError::Incompatible`。
 
 ## 操作语义
 
@@ -374,11 +374,11 @@ Keychain 软件密钥。
 宿主可执行文件必须使用包含 `com.apple.application-identifier` entitlement 的
 provisioning profile 完成签名。`cargo run` 生成的 ad-hoc 签名二进制不满足该条件；
 库无法在运行时为宿主补充 entitlement。缺少授权或 Secure Enclave 不可用时返回
-`XSecError::SystemProtectorUnavailable`。
+`XSecProtectorError::Unavailable`。
 
 解包已有 macOS payload 时，如果对应的 Secure Enclave 私钥已删除或因访问控制策略
-失效而无法再被 Keychain 找到，返回 `XSecError::SystemKeyInvalidated`。系统明确返回
-的认证失败仍保留为 `XSecError::AuthenticationFailed`，避免根据不可区分的状态码
+失效而无法再被 Keychain 找到，返回 `XSecProtectorError::KeyInvalidated`。系统明确返回
+的认证失败仍保留为 `XSecProtectorError::AuthenticationFailed`，避免根据不可区分的状态码
 猜测指纹集合是否发生变化。
 
 ## Linux backend
@@ -418,18 +418,18 @@ Linux `unwrap_key` 的顺序固定为：
 Linux 不将 DEK 或 KEK 写入 Secret Service、文件、keyring 等持久化存储。
 `delete` 只清除当前实例的受保护内存，且保持幂等。进程退出、实例销毁或重新创建
 protector 后，原 marker 无法恢复 DEK；`unwrap_key` 在用户验证成功后返回
-`XSecError::SystemKeyNotFound`。
+`XSecProtectorError::KeyNotFound`。
 
 应用必须安装仓库提供的 `polkit/com.xsec.XSec.policy`，并确保桌面会话中运行可用的
 polkit authentication agent。策略使用 `auth_self`，不保留跨调用授权；缺少 action
-时 `check_availability` 返回 `XSecError::SystemAuthenticationNotConfigured`。
+时 `check_availability` 返回 `XSecProtectorError::NotConfigured`。
 
 ### 兼容性
 
 Windows 只读写固定 148 字节的 `XSecSP` envelope v2，macOS 只读写 `XSecMP`
 envelope v1，Linux 只读写 `XSecLP` marker v1。各 backend 对其他平台格式返回
-`XSecError::IncompatibleSystemProtector`，对自身格式的其他版本返回
-`XSecError::UnsupportedVersion`。
+`XSecProtectorError::Incompatible`，对自身格式的其他版本返回
+`XSecProtectorError::Unsupported`。
 
 Windows Hello PRF 遵循 `biometric/` 参考实现：对持久化 challenge 请求签名，再对
 签名做 SHA-256。该设计依赖同一 Credential 对同一 challenge 产生稳定签名；发布前
@@ -454,16 +454,23 @@ Linux 发行版上验证。
 系统保护器使用平台无关的错误：
 
 ```rust
-SystemProtectorUnavailable
-SystemAuthenticationNotConfigured
-IncompatibleSystemProtector
-SystemKeyNotFound
-SystemKeyInvalidated
+Unsupported
+Unavailable
+NotConfigured
+Incompatible
+AccessDenied
 AuthenticationCancelled
 AuthenticationFailed
+UserVerificationRequired
+KeyNotFound
+KeyInvalidated
+InvalidData
+Internal
 ```
 
-平台 SDK 的具体错误放入现有的 `XSecError::Protector` source，不直接成为公开 enum 成员。认证失败不得暴露使用了 PIN、生物识别还是其他设备凭据。
+平台 SDK 的具体错误在 backend 内部归一化，不直接成为公开 enum 成员。
+`XSec` 只通过 `XSecError::Protector(XSecProtectorError)` 包装稳定类别。
+认证失败不得暴露使用了 PIN、生物识别还是其他设备凭据。
 
 ## 使用示例
 

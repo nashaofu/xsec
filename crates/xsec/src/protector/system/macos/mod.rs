@@ -1,6 +1,6 @@
 mod crypto;
 
-use std::{ffi::c_void, fmt, ptr, thread};
+use std::{ffi::c_void, ptr, thread};
 
 use core_foundation::{
     base::{CFTypeRef, TCFType, ToVoid},
@@ -24,7 +24,6 @@ use security_framework_sys::{
     access_control::{kSecAccessControlBiometryCurrentSet, kSecAccessControlPrivateKeyUsage},
     base::{
         SecKeyRef, errSecAuthFailed as ERR_SEC_AUTH_FAILED,
-        errSecDuplicateItem as ERR_SEC_DUPLICATE_ITEM,
         errSecItemNotFound as ERR_SEC_ITEM_NOT_FOUND, errSecSuccess as ERR_SEC_SUCCESS,
     },
     item::{
@@ -45,7 +44,7 @@ use zeroize::Zeroizing;
 
 use self::crypto::{Identity, MacosEnvelope, PublicKey, SharedSecret};
 use super::hash_identity;
-use crate::{XSecError, XSecProtector, XSecResult};
+use crate::{XSecProtector, XSecProtectorError, XSecProtectorResult};
 
 const KIND: &str = "system";
 const KEY_PREFIX: &str = "xsec-system-";
@@ -86,7 +85,7 @@ impl XSecSystemProtector {
         Self::from_identity(identity)
     }
 
-    pub(crate) fn from_payload(payload: &[u8]) -> XSecResult<Self> {
+    pub(crate) fn from_payload(payload: &[u8]) -> XSecProtectorResult<Self> {
         let identity = *MacosEnvelope::parse_stored(payload)?.identity();
         Ok(Self::from_identity(identity))
     }
@@ -98,7 +97,7 @@ impl XSecSystemProtector {
         }
     }
 
-    pub async fn check_availability(&self) -> XSecResult<()> {
+    pub async fn check_availability(&self) -> XSecProtectorResult<()> {
         let _ = self;
         run_blocking(|| {
             let context = authentication_context();
@@ -107,20 +106,16 @@ impl XSecSystemProtector {
             }
             .is_err()
             {
-                return Err(XSecError::SystemAuthenticationNotConfigured);
+                return Err(XSecProtectorError::NotConfigured);
             }
 
             let key = match create_private_key(None) {
                 Ok(key) => key,
-                Err(XSecError::AuthenticationFailed | XSecError::UserVerificationRequired) => {
-                    return Err(XSecError::SystemAuthenticationNotConfigured);
-                }
-                Err(XSecError::Protector { source })
-                    if source
-                        .downcast_ref::<MacosError>()
-                        .is_some_and(|error| error.code == ERR_SEC_PARAM) =>
-                {
-                    return Err(XSecError::SystemProtectorUnavailable);
+                Err(
+                    XSecProtectorError::AuthenticationFailed
+                    | XSecProtectorError::UserVerificationRequired,
+                ) => {
+                    return Err(XSecProtectorError::NotConfigured);
                 }
                 Err(error) => return Err(error),
             };
@@ -131,14 +126,14 @@ impl XSecSystemProtector {
                     Algorithm::ECDHKeyExchangeStandard.into(),
                 ) == 0
             } {
-                return Err(XSecError::ProviderNotSupported);
+                return Err(XSecProtectorError::Unsupported);
             }
             Ok(())
         })
         .await
     }
 
-    pub async fn delete(&self) -> XSecResult<()> {
+    pub async fn delete(&self) -> XSecProtectorResult<()> {
         let key_tag = self.key_tag.clone();
         run_blocking(move || delete_keys(&key_tag)).await
     }
@@ -149,7 +144,10 @@ impl XSecProtector for XSecSystemProtector {
         KIND
     }
 
-    async fn wrap_key<'a>(&'a self, key: &'a SecretBox<[u8; KEY_SIZE]>) -> XSecResult<Vec<u8>> {
+    async fn wrap_key<'a>(
+        &'a self,
+        key: &'a SecretBox<[u8; KEY_SIZE]>,
+    ) -> XSecProtectorResult<Vec<u8>> {
         let identity = self.identity;
         let key_tag = self.key_tag.clone();
         let key = SecretBox::new(Box::new(*key.expose_secret()));
@@ -158,14 +156,14 @@ impl XSecProtector for XSecSystemProtector {
             let recipient_private_key = open_or_create_private_key(&key_tag)?;
             let recipient_public_key = recipient_private_key
                 .public_key()
-                .ok_or(XSecError::Crypto)?;
+                .ok_or(XSecProtectorError::Internal)?;
             let recipient_public_bytes = export_public_key(&recipient_public_key)?;
             let recipient_key_hash: [u8; 32] = Sha256::digest(recipient_public_bytes).into();
 
             let ephemeral_private_key = create_software_private_key()?;
             let ephemeral_public_key = ephemeral_private_key
                 .public_key()
-                .ok_or(XSecError::Crypto)?;
+                .ok_or(XSecProtectorError::Internal)?;
             let ephemeral_public_bytes = export_public_key(&ephemeral_public_key)?;
             let shared_secret = raw_ecdh(&recipient_private_key, &ephemeral_public_key)?;
 
@@ -180,7 +178,10 @@ impl XSecProtector for XSecSystemProtector {
         .await
     }
 
-    async fn unwrap_key<'a>(&'a self, payload: &'a [u8]) -> XSecResult<SecretBox<[u8; KEY_SIZE]>> {
+    async fn unwrap_key<'a>(
+        &'a self,
+        payload: &'a [u8],
+    ) -> XSecProtectorResult<SecretBox<[u8; KEY_SIZE]>> {
         let envelope = MacosEnvelope::parse(payload, &self.identity)?;
         let key_tag = self.key_tag.clone();
         let recipient_key_hash = *envelope.recipient_key_hash();
@@ -190,15 +191,17 @@ impl XSecProtector for XSecSystemProtector {
 
         run_blocking(move || {
             let private_key = match open_private_key(&key_tag) {
-                Err(XSecError::SystemKeyNotFound) => {
-                    return Err(XSecError::SystemKeyInvalidated);
+                Err(XSecProtectorError::KeyNotFound) => {
+                    return Err(XSecProtectorError::KeyInvalidated);
                 }
                 result => result?,
             };
-            let public_key = private_key.public_key().ok_or(XSecError::Crypto)?;
+            let public_key = private_key
+                .public_key()
+                .ok_or(XSecProtectorError::Internal)?;
             let actual_key_hash: [u8; 32] = Sha256::digest(export_public_key(&public_key)?).into();
             if actual_key_hash != recipient_key_hash {
-                return Err(XSecError::SystemKeyInvalidated);
+                return Err(XSecProtectorError::KeyInvalidated);
             }
 
             let ephemeral_public_key = import_public_key(&ephemeral_public_key)?;
@@ -209,28 +212,21 @@ impl XSecProtector for XSecSystemProtector {
     }
 }
 
-fn open_or_create_private_key(key_tag: &[u8]) -> XSecResult<SecKey> {
+fn open_or_create_private_key(key_tag: &[u8]) -> XSecProtectorResult<SecKey> {
     match open_private_key(key_tag) {
         Ok(key) => Ok(key),
-        Err(XSecError::SystemKeyNotFound) => match create_private_key(Some(key_tag)) {
+        Err(XSecProtectorError::KeyNotFound) => match create_private_key(Some(key_tag)) {
             Ok(private_key) => {
                 drop(private_key);
                 open_private_key(key_tag)
             }
-            Err(XSecError::Protector { source })
-                if source
-                    .downcast_ref::<MacosError>()
-                    .is_some_and(|error| error.code == ERR_SEC_DUPLICATE_ITEM) =>
-            {
-                open_private_key(key_tag)
-            }
-            Err(error) => Err(error),
+            Err(create_error) => open_private_key(key_tag).or(Err(create_error)),
         },
         Err(error) => Err(error),
     }
 }
 
-fn create_private_key(key_tag: Option<&[u8]>) -> XSecResult<SecKey> {
+fn create_private_key(key_tag: Option<&[u8]>) -> XSecProtectorResult<SecKey> {
     let access_control = SecAccessControl::create_with_protection(
         Some(ProtectionMode::AccessibleWhenPasscodeSetThisDeviceOnly),
         kSecAccessControlPrivateKeyUsage | kSecAccessControlBiometryCurrentSet,
@@ -280,7 +276,7 @@ fn create_private_key(key_tag: Option<&[u8]>) -> XSecResult<SecKey> {
     SecKey::generate(attributes.to_immutable()).map_err(map_cf_error)
 }
 
-fn create_software_private_key() -> XSecResult<SecKey> {
+fn create_software_private_key() -> XSecProtectorResult<SecKey> {
     let key_size = CFNumber::from(256);
     let attributes = CFMutableDictionary::from_CFType_pairs(&[
         (
@@ -297,7 +293,7 @@ fn create_software_private_key() -> XSecResult<SecKey> {
     SecKey::generate(attributes.to_immutable()).map_err(map_cf_error)
 }
 
-fn open_private_key(key_tag: &[u8]) -> XSecResult<SecKey> {
+fn open_private_key(key_tag: &[u8]) -> XSecProtectorResult<SecKey> {
     let tag = CFData::from_buffer(key_tag);
     let key_size = CFNumber::from(256);
     let mut query = CFMutableDictionary::from_CFType_pairs(&[
@@ -349,7 +345,7 @@ fn open_private_key(key_tag: &[u8]) -> XSecResult<SecKey> {
         return Err(map_status(status));
     }
     if result.is_null() {
-        return Err(XSecError::SystemKeyNotFound);
+        return Err(XSecProtectorError::KeyNotFound);
     }
     Ok(unsafe { SecKey::wrap_under_create_rule(result as SecKeyRef) })
 }
@@ -358,7 +354,7 @@ fn authentication_context() -> Retained<LAContext> {
     unsafe { msg_send![LAContext::class(), new] }
 }
 
-fn delete_keys(key_tag: &[u8]) -> XSecResult<()> {
+fn delete_keys(key_tag: &[u8]) -> XSecProtectorResult<()> {
     let tag = CFData::from_buffer(key_tag);
     let key_size = CFNumber::from(256);
     let query = CFMutableDictionary::from_CFType_pairs(&[
@@ -394,18 +390,20 @@ fn delete_keys(key_tag: &[u8]) -> XSecResult<()> {
     }
 }
 
-fn export_public_key(key: &SecKey) -> XSecResult<PublicKey> {
-    let bytes = key.external_representation().ok_or(XSecError::Crypto)?;
+fn export_public_key(key: &SecKey) -> XSecProtectorResult<PublicKey> {
+    let bytes = key
+        .external_representation()
+        .ok_or(XSecProtectorError::Internal)?;
     let bytes = bytes.bytes();
     if bytes.len() != PUBLIC_KEY_SIZE || bytes[0] != 4 {
-        return Err(XSecError::Crypto);
+        return Err(XSecProtectorError::Internal);
     }
-    bytes.try_into().map_err(|_| XSecError::Crypto)
+    bytes.try_into().map_err(|_| XSecProtectorError::Internal)
 }
 
-fn import_public_key(bytes: &PublicKey) -> XSecResult<SecKey> {
+fn import_public_key(bytes: &PublicKey) -> XSecProtectorResult<SecKey> {
     if bytes[0] != 4 {
-        return Err(XSecError::Corrupted);
+        return Err(XSecProtectorError::InvalidData);
     }
     let data = CFData::from_buffer(bytes);
     let key_size = CFNumber::from(256);
@@ -440,7 +438,7 @@ fn import_public_key(bytes: &PublicKey) -> XSecResult<SecKey> {
     Ok(unsafe { SecKey::wrap_under_create_rule(key) })
 }
 
-fn raw_ecdh(private_key: &SecKey, public_key: &SecKey) -> XSecResult<SharedSecret> {
+fn raw_ecdh(private_key: &SecKey, public_key: &SecKey) -> XSecProtectorResult<SharedSecret> {
     let algorithm = Algorithm::ECDHKeyExchangeStandard.into();
     if unsafe {
         SecKeyIsAlgorithmSupported(
@@ -449,7 +447,7 @@ fn raw_ecdh(private_key: &SecKey, public_key: &SecKey) -> XSecResult<SharedSecre
             algorithm,
         ) == 0
     } {
-        return Err(XSecError::ProviderNotSupported);
+        return Err(XSecProtectorError::Unsupported);
     }
 
     let parameters = CFMutableDictionary::<*const c_void, *const c_void>::new();
@@ -473,17 +471,17 @@ fn raw_ecdh(private_key: &SecKey, public_key: &SecKey) -> XSecResult<SharedSecre
     let data = unsafe { CFData::wrap_under_create_rule(result) };
     let bytes = Zeroizing::new(data.to_vec());
     if bytes.len() != KEY_SIZE {
-        return Err(XSecError::Crypto);
+        return Err(XSecProtectorError::Internal);
     }
     let mut shared_secret = Zeroizing::new([0; KEY_SIZE]);
     shared_secret.copy_from_slice(&bytes);
     Ok(shared_secret)
 }
 
-async fn run_blocking<T, F>(operation: F) -> XSecResult<T>
+async fn run_blocking<T, F>(operation: F) -> XSecProtectorResult<T>
 where
     T: Send + 'static,
-    F: FnOnce() -> XSecResult<T> + Send + 'static,
+    F: FnOnce() -> XSecProtectorResult<T> + Send + 'static,
 {
     let (sender, receiver) = oneshot::channel();
     thread::Builder::new()
@@ -492,97 +490,68 @@ where
             let _ = sender.send(operation());
         })
         .map_err(map_protector_error)?;
-    receiver.await.map_err(|_| XSecError::Crypto)?
+    receiver.await.map_err(|_| XSecProtectorError::Internal)?
 }
 
-fn take_cf_error(error: CFErrorRef) -> XSecError {
+fn take_cf_error(error: CFErrorRef) -> XSecProtectorError {
     if error.is_null() {
-        XSecError::Crypto
+        XSecProtectorError::Internal
     } else {
         map_cf_error(unsafe { CFError::wrap_under_create_rule(error) })
     }
 }
 
-fn map_cf_error(error: CFError) -> XSecError {
+fn map_cf_error(error: CFError) -> XSecProtectorError {
     let code = error.code() as i32;
     if error.domain().to_string() == LA_ERROR_DOMAIN {
         return match code {
             LA_ERROR_USER_CANCEL
             | LA_ERROR_USER_FALLBACK
             | LA_ERROR_SYSTEM_CANCEL
-            | LA_ERROR_APP_CANCEL => XSecError::AuthenticationCancelled,
+            | LA_ERROR_APP_CANCEL => XSecProtectorError::AuthenticationCancelled,
             LA_ERROR_PASSCODE_NOT_SET
             | LA_ERROR_BIOMETRY_NOT_AVAILABLE
-            | LA_ERROR_BIOMETRY_NOT_ENROLLED => XSecError::SystemAuthenticationNotConfigured,
-            LA_ERROR_NOT_INTERACTIVE => XSecError::UserVerificationRequired,
+            | LA_ERROR_BIOMETRY_NOT_ENROLLED => XSecProtectorError::NotConfigured,
+            LA_ERROR_NOT_INTERACTIVE => XSecProtectorError::UserVerificationRequired,
             LA_ERROR_AUTHENTICATION_FAILED | LA_ERROR_BIOMETRY_LOCKOUT => {
-                XSecError::AuthenticationFailed
+                XSecProtectorError::AuthenticationFailed
             }
-            _ => map_protector_error(MacosError::new(code, error.to_string())),
+            _ => XSecProtectorError::Internal,
         };
     }
 
     match code {
-        ERR_SEC_USER_CANCELED => XSecError::AuthenticationCancelled,
-        ERR_SEC_AUTH_FAILED => XSecError::AuthenticationFailed,
-        ERR_SEC_ITEM_NOT_FOUND => XSecError::SystemKeyNotFound,
-        ERR_SEC_INTERACTION_NOT_ALLOWED => XSecError::UserVerificationRequired,
-        ERR_SEC_MISSING_ENTITLEMENT | ERR_SEC_NOT_AVAILABLE => {
-            XSecError::SystemProtectorUnavailable
-        }
-        _ => map_protector_error(MacosError::new(code, error.to_string())),
+        ERR_SEC_USER_CANCELED => XSecProtectorError::AuthenticationCancelled,
+        ERR_SEC_AUTH_FAILED => XSecProtectorError::AuthenticationFailed,
+        ERR_SEC_ITEM_NOT_FOUND => XSecProtectorError::KeyNotFound,
+        ERR_SEC_INTERACTION_NOT_ALLOWED => XSecProtectorError::UserVerificationRequired,
+        ERR_SEC_MISSING_ENTITLEMENT => XSecProtectorError::AccessDenied,
+        ERR_SEC_NOT_AVAILABLE | ERR_SEC_PARAM => XSecProtectorError::Unavailable,
+        _ => XSecProtectorError::Internal,
     }
 }
 
-fn map_security_error(error: security_framework::base::Error) -> XSecError {
+fn map_security_error(error: security_framework::base::Error) -> XSecProtectorError {
     map_status(error.code())
 }
 
-fn map_status(status: i32) -> XSecError {
+fn map_status(status: i32) -> XSecProtectorError {
     match status {
-        ERR_SEC_USER_CANCELED => XSecError::AuthenticationCancelled,
-        ERR_SEC_AUTH_FAILED => XSecError::AuthenticationFailed,
-        ERR_SEC_ITEM_NOT_FOUND => XSecError::SystemKeyNotFound,
-        ERR_SEC_INTERACTION_NOT_ALLOWED => XSecError::UserVerificationRequired,
-        ERR_SEC_MISSING_ENTITLEMENT | ERR_SEC_NOT_AVAILABLE => {
-            XSecError::SystemProtectorUnavailable
-        }
-        _ => map_protector_error(MacosError::new(
-            status,
-            security_framework::base::Error::from_code(status).to_string(),
-        )),
+        ERR_SEC_USER_CANCELED => XSecProtectorError::AuthenticationCancelled,
+        ERR_SEC_AUTH_FAILED => XSecProtectorError::AuthenticationFailed,
+        ERR_SEC_ITEM_NOT_FOUND => XSecProtectorError::KeyNotFound,
+        ERR_SEC_INTERACTION_NOT_ALLOWED => XSecProtectorError::UserVerificationRequired,
+        ERR_SEC_MISSING_ENTITLEMENT => XSecProtectorError::AccessDenied,
+        ERR_SEC_NOT_AVAILABLE | ERR_SEC_PARAM => XSecProtectorError::Unavailable,
+        _ => XSecProtectorError::Internal,
     }
 }
 
-fn map_protector_error(error: impl std::error::Error + Send + Sync + 'static) -> XSecError {
-    XSecError::Protector {
-        source: Box::new(error),
-    }
+fn map_protector_error(
+    _error: impl std::error::Error + Send + Sync + 'static,
+) -> XSecProtectorError {
+    XSecProtectorError::Internal
 }
-
-#[derive(Debug)]
-struct MacosError {
-    code: i32,
-    message: String,
-}
-
-impl MacosError {
-    fn new(code: i32, message: String) -> Self {
-        Self { code, message }
-    }
-}
-
-impl fmt::Display for MacosError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "macOS Security framework error {}: {}",
-            self.code, self.message
-        )
-    }
-}
-
-impl std::error::Error for MacosError {}
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";

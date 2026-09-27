@@ -7,7 +7,9 @@ use getrandom::fill;
 use secrecy::{ExposeSecret, SecretBox};
 use zeroize::Zeroizing;
 
-use crate::{XSecError, XSecResult, metadata::MAX_PAYLOAD_LENGTH, protector::XSecProtector};
+use crate::{
+    XSecProtectorError, XSecProtectorResult, metadata::MAX_PAYLOAD_LENGTH, protector::XSecProtector,
+};
 
 const PASSWORD_KIND: &str = "password";
 const PAYLOAD_VERSION: u16 = 1;
@@ -35,11 +37,11 @@ impl XSecProtector for XSecPasswordProtector {
         PASSWORD_KIND
     }
 
-    async fn wrap_key<'a>(&'a self, key: &'a SecretBox<[u8; 32]>) -> XSecResult<Vec<u8>> {
+    async fn wrap_key<'a>(&'a self, key: &'a SecretBox<[u8; 32]>) -> XSecProtectorResult<Vec<u8>> {
         let mut salt = [0; SALT_LENGTH];
         let mut nonce = [0; NONCE_LENGTH];
-        fill(&mut salt).map_err(|_| XSecError::Crypto)?;
-        fill(&mut nonce).map_err(|_| XSecError::Crypto)?;
+        fill(&mut salt).map_err(|_| XSecProtectorError::Internal)?;
+        fill(&mut nonce).map_err(|_| XSecProtectorError::Internal)?;
         let mut header = Vec::with_capacity(63);
         header.extend_from_slice(&PAYLOAD_VERSION.to_be_bytes());
         header.extend_from_slice(&KDF_ALGORITHM.to_be_bytes());
@@ -59,8 +61,10 @@ impl XSecProtector for XSecPasswordProtector {
             PARALLELISM,
         )
         .await?;
-        let cipher = Aes256Gcm::new_from_slice(&kek[..]).map_err(|_| XSecError::Crypto)?;
-        let nonce_ref = Nonce::try_from(nonce.as_slice()).map_err(|_| XSecError::Crypto)?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&kek[..]).map_err(|_| XSecProtectorError::Internal)?;
+        let nonce_ref =
+            Nonce::try_from(nonce.as_slice()).map_err(|_| XSecProtectorError::Internal)?;
         let ciphertext = cipher
             .encrypt(
                 &nonce_ref,
@@ -69,12 +73,15 @@ impl XSecProtector for XSecPasswordProtector {
                     aad: &header,
                 },
             )
-            .map_err(|_| XSecError::Crypto)?;
+            .map_err(|_| XSecProtectorError::Internal)?;
         header.extend_from_slice(&ciphertext);
         Ok(header)
     }
 
-    async fn unwrap_key<'a>(&'a self, payload: &'a [u8]) -> XSecResult<SecretBox<[u8; 32]>> {
+    async fn unwrap_key<'a>(
+        &'a self,
+        payload: &'a [u8],
+    ) -> XSecProtectorResult<SecretBox<[u8; 32]>> {
         let parsed = PasswordPayload::parse(payload)?;
         let kek = derive_key(
             Zeroizing::new(self.password.expose_secret().clone()),
@@ -84,8 +91,10 @@ impl XSecProtector for XSecPasswordProtector {
             parsed.parallelism,
         )
         .await?;
-        let cipher = Aes256Gcm::new_from_slice(&kek[..]).map_err(|_| XSecError::Crypto)?;
-        let nonce_ref = Nonce::try_from(parsed.nonce).map_err(|_| XSecError::Corrupted)?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&kek[..]).map_err(|_| XSecProtectorError::Internal)?;
+        let nonce_ref =
+            Nonce::try_from(parsed.nonce).map_err(|_| XSecProtectorError::InvalidData)?;
         let plaintext = Zeroizing::new(
             cipher
                 .decrypt(
@@ -95,10 +104,10 @@ impl XSecProtector for XSecPasswordProtector {
                         aad: parsed.header,
                     },
                 )
-                .map_err(|_| XSecError::AuthenticationFailed)?,
+                .map_err(|_| XSecProtectorError::AuthenticationFailed)?,
         );
         if plaintext.len() != KEY_LENGTH {
-            return Err(XSecError::Corrupted);
+            return Err(XSecProtectorError::InvalidData);
         }
         let mut key = [0; KEY_LENGTH];
         key.copy_from_slice(&plaintext);
@@ -117,46 +126,51 @@ struct PasswordPayload<'a> {
 }
 
 impl<'a> PasswordPayload<'a> {
-    fn parse(payload: &'a [u8]) -> XSecResult<Self> {
+    fn parse(payload: &'a [u8]) -> XSecProtectorResult<Self> {
         if payload.len() > MAX_PAYLOAD_LENGTH
             || payload.len() < 20 + SALT_LENGTH + 1 + NONCE_LENGTH + KEY_LENGTH + TAG_LENGTH
         {
-            return Err(XSecError::Corrupted);
+            return Err(XSecProtectorError::InvalidData);
         }
         if u16::from_be_bytes([payload[0], payload[1]]) != PAYLOAD_VERSION {
-            return Err(XSecError::UnsupportedVersion);
+            return Err(XSecProtectorError::Unsupported);
         }
         if u16::from_be_bytes([payload[2], payload[3]]) != KDF_ALGORITHM {
-            return Err(XSecError::UnsupportedAlgorithm);
+            return Err(XSecProtectorError::Unsupported);
         }
-        let memory_cost =
-            u32::from_be_bytes(payload[4..8].try_into().map_err(|_| XSecError::Corrupted)?);
+        let memory_cost = u32::from_be_bytes(
+            payload[4..8]
+                .try_into()
+                .map_err(|_| XSecProtectorError::InvalidData)?,
+        );
         let time_cost = u32::from_be_bytes(
             payload[8..12]
                 .try_into()
-                .map_err(|_| XSecError::Corrupted)?,
+                .map_err(|_| XSecProtectorError::InvalidData)?,
         );
         let parallelism = u32::from_be_bytes(
             payload[12..16]
                 .try_into()
-                .map_err(|_| XSecError::Corrupted)?,
+                .map_err(|_| XSecProtectorError::InvalidData)?,
         );
         let derived_key_len = u16::from_be_bytes([payload[16], payload[17]]) as usize;
         if derived_key_len != KEY_LENGTH {
-            return Err(XSecError::Corrupted);
+            return Err(XSecProtectorError::InvalidData);
         }
         let salt_len = u16::from_be_bytes([payload[18], payload[19]]) as usize;
         validate_params(memory_cost, time_cost, parallelism, salt_len)?;
-        let nonce_len_index = 20usize.checked_add(salt_len).ok_or(XSecError::Corrupted)?;
+        let nonce_len_index = 20usize
+            .checked_add(salt_len)
+            .ok_or(XSecProtectorError::InvalidData)?;
         if nonce_len_index >= payload.len() || payload[nonce_len_index] as usize != NONCE_LENGTH {
-            return Err(XSecError::Corrupted);
+            return Err(XSecProtectorError::InvalidData);
         }
         let nonce_start = nonce_len_index + 1;
         let ciphertext_start = nonce_start
             .checked_add(NONCE_LENGTH)
-            .ok_or(XSecError::Corrupted)?;
+            .ok_or(XSecProtectorError::InvalidData)?;
         if payload.len() != ciphertext_start + KEY_LENGTH + TAG_LENGTH {
-            return Err(XSecError::Corrupted);
+            return Err(XSecProtectorError::InvalidData);
         }
         Ok(Self {
             memory_cost,
@@ -170,14 +184,19 @@ impl<'a> PasswordPayload<'a> {
     }
 }
 
-fn validate_params(memory: u32, time: u32, parallelism: u32, salt_len: usize) -> XSecResult<()> {
+fn validate_params(
+    memory: u32,
+    time: u32,
+    parallelism: u32,
+    salt_len: usize,
+) -> XSecProtectorResult<()> {
     if !(19_456..=262_144).contains(&memory)
         || !(2..=10).contains(&time)
         || !(1..=8).contains(&parallelism)
         || !(16..=64).contains(&salt_len)
         || memory < 8 * parallelism
     {
-        return Err(XSecError::Corrupted);
+        return Err(XSecProtectorError::InvalidData);
     }
     Ok(())
 }
@@ -188,18 +207,18 @@ async fn derive_key(
     memory: u32,
     time: u32,
     parallelism: u32,
-) -> XSecResult<Zeroizing<[u8; KEY_LENGTH]>> {
+) -> XSecProtectorResult<Zeroizing<[u8; KEY_LENGTH]>> {
     validate_params(memory, time, parallelism, salt.len())?;
     tokio::task::spawn_blocking(move || {
         let params = Params::new(memory, time, parallelism, Some(KEY_LENGTH))
-            .map_err(XSecError::protector)?;
+            .map_err(|_| XSecProtectorError::Internal)?;
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let mut key = Zeroizing::new([0; KEY_LENGTH]);
         argon2
             .hash_password_into(&password, &salt, key.as_mut())
-            .map_err(XSecError::protector)?;
+            .map_err(|_| XSecProtectorError::Internal)?;
         Ok(key)
     })
     .await
-    .map_err(XSecError::protector)?
+    .map_err(|_| XSecProtectorError::Internal)?
 }

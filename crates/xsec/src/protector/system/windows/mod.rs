@@ -2,7 +2,7 @@ mod crypto;
 
 use self::crypto::{Challenge, Identity, SystemEnvelope, WindowsHelloPrf};
 use super::hash_identity;
-use crate::{XSecError, XSecProtector, XSecResult};
+use crate::{XSecProtector, XSecProtectorError, XSecProtectorResult};
 use secrecy::SecretBox;
 use windows::{
     Security::{
@@ -30,7 +30,7 @@ impl XSecSystemProtector {
         Self::from_identity(identity)
     }
 
-    pub(crate) fn from_payload(payload: &[u8]) -> XSecResult<Self> {
+    pub(crate) fn from_payload(payload: &[u8]) -> XSecProtectorResult<Self> {
         let identity = *SystemEnvelope::parse_stored(payload)?.identity();
         Ok(Self::from_identity(identity))
     }
@@ -42,15 +42,15 @@ impl XSecSystemProtector {
         }
     }
 
-    pub async fn check_availability(&self) -> XSecResult<()> {
+    pub async fn check_availability(&self) -> XSecProtectorResult<()> {
         if hello_supported().await? {
             Ok(())
         } else {
-            Err(XSecError::WindowsHelloNotSupported)
+            Err(XSecProtectorError::Unsupported)
         }
     }
 
-    pub async fn delete(&self) -> XSecResult<()> {
+    pub async fn delete(&self) -> XSecProtectorResult<()> {
         let name = HSTRING::from(&self.credential_name);
         match KeyCredentialManager::DeleteAsync(&name)
             .map_err(map_error)?
@@ -62,7 +62,7 @@ impl XSecSystemProtector {
         }
     }
 
-    async fn create_credential(&self) -> XSecResult<KeyCredential> {
+    async fn create_credential(&self) -> XSecProtectorResult<KeyCredential> {
         require_hello().await?;
         let result = KeyCredentialManager::RequestCreateAsync(
             &HSTRING::from(&self.credential_name),
@@ -78,14 +78,14 @@ impl XSecSystemProtector {
         }
     }
 
-    async fn open_credential(&self) -> XSecResult<KeyCredential> {
+    async fn open_credential(&self) -> XSecProtectorResult<KeyCredential> {
         let result = KeyCredentialManager::OpenAsync(&HSTRING::from(&self.credential_name))
             .map_err(map_error)?
             .await
             .map_err(map_error)?;
         match result.Status().map_err(map_error)? {
             KeyCredentialStatus::Success => result.Credential().map_err(map_error),
-            KeyCredentialStatus::NotFound => Err(XSecError::SystemKeyNotFound),
+            KeyCredentialStatus::NotFound => Err(XSecProtectorError::KeyNotFound),
             status => Err(map_credential_status(status)),
         }
     }
@@ -96,13 +96,16 @@ impl XSecSystemProtector {
     /// There is deliberately no in-process key cache or separate yes/no
     /// authorization path: the returned signature is the input to KEK
     /// derivation, so the Windows Hello operation directly gates decryption.
-    async fn authorize(&self, challenge: &[u8]) -> XSecResult<WindowsHelloPrf> {
+    async fn authorize(&self, challenge: &[u8]) -> XSecProtectorResult<WindowsHelloPrf> {
         require_hello().await?;
         let credential = self.open_credential().await?;
         Self::sign(&credential, challenge).await
     }
 
-    async fn sign(credential: &KeyCredential, challenge: &[u8]) -> XSecResult<WindowsHelloPrf> {
+    async fn sign(
+        credential: &KeyCredential,
+        challenge: &[u8],
+    ) -> XSecProtectorResult<WindowsHelloPrf> {
         let operation = {
             let input = CryptographicBuffer::CreateFromByteArray(challenge).map_err(map_error)?;
             credential.RequestSignAsync(&input).map_err(map_error)?
@@ -115,7 +118,7 @@ impl XSecSystemProtector {
         let buffer = response.Result().map_err(map_error)?;
         let length = buffer.Length().map_err(map_error)? as usize;
         if length == 0 || length > MAX_SIGNATURE_SIZE {
-            return Err(XSecError::AuthenticationFailed);
+            return Err(XSecProtectorError::AuthenticationFailed);
         }
         let mut bytes = Array::<u8>::with_len(length);
         if let Err(error) = CryptographicBuffer::CopyToByteArray(&buffer, &mut bytes) {
@@ -133,14 +136,17 @@ impl XSecProtector for XSecSystemProtector {
         KIND
     }
 
-    async fn wrap_key<'a>(&'a self, key: &'a SecretBox<[u8; 32]>) -> XSecResult<Vec<u8>> {
+    async fn wrap_key<'a>(&'a self, key: &'a SecretBox<[u8; 32]>) -> XSecProtectorResult<Vec<u8>> {
         let credential = self.create_credential().await?;
         let challenge = Challenge::random()?;
         let prf = Self::sign(&credential, challenge.as_bytes()).await?;
         crypto::seal_key(key, &self.identity, &challenge, &prf)
     }
 
-    async fn unwrap_key<'a>(&'a self, payload: &'a [u8]) -> XSecResult<SecretBox<[u8; 32]>> {
+    async fn unwrap_key<'a>(
+        &'a self,
+        payload: &'a [u8],
+    ) -> XSecProtectorResult<SecretBox<[u8; 32]>> {
         let envelope = SystemEnvelope::parse(payload, &self.identity)?;
         let prf = self.authorize(envelope.challenge()).await?;
         envelope.open(&prf)
@@ -157,37 +163,35 @@ fn hex(bytes: &[u8]) -> String {
     result
 }
 
-async fn hello_supported() -> XSecResult<bool> {
+async fn hello_supported() -> XSecProtectorResult<bool> {
     KeyCredentialManager::IsSupportedAsync()
         .map_err(map_error)?
         .await
         .map_err(map_error)
 }
 
-async fn require_hello() -> XSecResult<()> {
+async fn require_hello() -> XSecProtectorResult<()> {
     if hello_supported().await? {
         Ok(())
     } else {
-        Err(XSecError::WindowsHelloNotSupported)
+        Err(XSecProtectorError::Unsupported)
     }
 }
 
-fn map_credential_status(status: KeyCredentialStatus) -> XSecError {
+fn map_credential_status(status: KeyCredentialStatus) -> XSecProtectorError {
     match status {
-        KeyCredentialStatus::UserCanceled => XSecError::AuthenticationCancelled,
-        KeyCredentialStatus::UserPrefersPassword => XSecError::UserVerificationRequired,
-        KeyCredentialStatus::SecurityDeviceLocked => XSecError::AuthenticationFailed,
-        KeyCredentialStatus::CredentialAlreadyExists => XSecError::WindowsHelloNotConfigured,
-        KeyCredentialStatus::NotFound => XSecError::SystemKeyNotFound,
-        KeyCredentialStatus::UnknownError => XSecError::WindowsHelloNotConfigured,
-        _ => XSecError::Crypto,
+        KeyCredentialStatus::UserCanceled => XSecProtectorError::AuthenticationCancelled,
+        KeyCredentialStatus::UserPrefersPassword => XSecProtectorError::UserVerificationRequired,
+        KeyCredentialStatus::SecurityDeviceLocked => XSecProtectorError::AuthenticationFailed,
+        KeyCredentialStatus::CredentialAlreadyExists => XSecProtectorError::NotConfigured,
+        KeyCredentialStatus::NotFound => XSecProtectorError::KeyNotFound,
+        KeyCredentialStatus::UnknownError => XSecProtectorError::NotConfigured,
+        _ => XSecProtectorError::Internal,
     }
 }
 
-fn map_error(error: windows::core::Error) -> XSecError {
-    XSecError::Protector {
-        source: Box::new(error),
-    }
+fn map_error(_error: windows::core::Error) -> XSecProtectorError {
+    XSecProtectorError::Internal
 }
 
 fn is_not_found(error: &windows::core::Error) -> bool {

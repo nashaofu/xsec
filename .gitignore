@@ -17,7 +17,9 @@ target/
 .env
 .env.*
 !.env.example
+.xsec
 .xsec.keys
+.xsec.keys.lock
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

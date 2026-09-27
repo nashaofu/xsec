@@ -46,18 +46,18 @@ impl XSecSystemProtector {
         }
     }
 
-    pub(crate) fn from_payload(_payload: &[u8]) -> crate::XSecResult<Self> {
-        Err(crate::XSecError::SystemProtectorUnavailable)
+    pub(crate) fn from_payload(_payload: &[u8]) -> crate::XSecProtectorResult<Self> {
+        Err(crate::XSecProtectorError::Unavailable)
     }
 
-    pub async fn check_availability(&self) -> crate::XSecResult<()> {
+    pub async fn check_availability(&self) -> crate::XSecProtectorResult<()> {
         let _ = self;
-        Err(crate::XSecError::SystemProtectorUnavailable)
+        Err(crate::XSecProtectorError::Unavailable)
     }
 
-    pub async fn delete(&self) -> crate::XSecResult<()> {
+    pub async fn delete(&self) -> crate::XSecProtectorResult<()> {
         let _ = self;
-        Err(crate::XSecError::SystemProtectorUnavailable)
+        Err(crate::XSecProtectorError::Unavailable)
     }
 }
 
@@ -70,15 +70,15 @@ impl crate::XSecProtector for XSecSystemProtector {
     async fn wrap_key<'a>(
         &'a self,
         _key: &'a secrecy::SecretBox<[u8; 32]>,
-    ) -> crate::XSecResult<Vec<u8>> {
-        Err(crate::XSecError::SystemProtectorUnavailable)
+    ) -> crate::XSecProtectorResult<Vec<u8>> {
+        Err(crate::XSecProtectorError::Unavailable)
     }
 
     async fn unwrap_key<'a>(
         &'a self,
         _payload: &'a [u8],
-    ) -> crate::XSecResult<secrecy::SecretBox<[u8; 32]>> {
+    ) -> crate::XSecProtectorResult<secrecy::SecretBox<[u8; 32]>> {
         let _ = (self, _payload);
-        Err(crate::XSecError::SystemProtectorUnavailable)
+        Err(crate::XSecProtectorError::Unavailable)
     }
 }

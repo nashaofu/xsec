@@ -13,8 +13,8 @@ use xsec::XSecFileStorage;
 ))]
 use xsec::XSecSystemProtector;
 use xsec::{
-    XSec, XSecError, XSecProtector, XSecResult, XSecStatus, XSecStorage, XSecStorageError,
-    XSecStorageResult,
+    XSec, XSecError, XSecProtector, XSecProtectorError, XSecProtectorResult, XSecStatus,
+    XSecStorage, XSecStorageError, XSecStorageResult,
 };
 #[derive(Clone, Default)]
 struct Mem(Arc<Mutex<Option<Vec<u8>>>>);
@@ -36,16 +36,16 @@ impl XSecProtector for P {
     fn kind(&self) -> &'static str {
         self.0
     }
-    async fn wrap_key<'a>(&'a self, k: &'a SecretBox<[u8; 32]>) -> XSecResult<Vec<u8>> {
+    async fn wrap_key<'a>(&'a self, k: &'a SecretBox<[u8; 32]>) -> XSecProtectorResult<Vec<u8>> {
         Ok(k.expose_secret().iter().map(|x| x ^ self.1).collect())
     }
-    async fn unwrap_key<'a>(&'a self, b: &'a [u8]) -> XSecResult<SecretBox<[u8; 32]>> {
+    async fn unwrap_key<'a>(&'a self, b: &'a [u8]) -> XSecProtectorResult<SecretBox<[u8; 32]>> {
         let v: [u8; 32] = b
             .iter()
             .map(|x| x ^ self.1)
             .collect::<Vec<_>>()
             .try_into()
-            .map_err(|_| XSecError::AuthenticationFailed)?;
+            .map_err(|_| XSecProtectorError::AuthenticationFailed)?;
         Ok(SecretBox::new(Box::new(v)))
     }
 }
@@ -56,12 +56,15 @@ impl XSecProtector for FailingProtector {
         "failing"
     }
 
-    async fn wrap_key<'a>(&'a self, _key: &'a SecretBox<[u8; 32]>) -> XSecResult<Vec<u8>> {
-        Err(XSecError::Crypto)
+    async fn wrap_key<'a>(&'a self, _key: &'a SecretBox<[u8; 32]>) -> XSecProtectorResult<Vec<u8>> {
+        Err(XSecProtectorError::Internal)
     }
 
-    async fn unwrap_key<'a>(&'a self, _payload: &'a [u8]) -> XSecResult<SecretBox<[u8; 32]>> {
-        Err(XSecError::Crypto)
+    async fn unwrap_key<'a>(
+        &'a self,
+        _payload: &'a [u8],
+    ) -> XSecProtectorResult<SecretBox<[u8; 32]>> {
+        Err(XSecProtectorError::Internal)
     }
 }
 
@@ -71,11 +74,14 @@ impl XSecProtector for PendingProtector {
         self.0
     }
 
-    async fn wrap_key<'a>(&'a self, _key: &'a SecretBox<[u8; 32]>) -> XSecResult<Vec<u8>> {
+    async fn wrap_key<'a>(&'a self, _key: &'a SecretBox<[u8; 32]>) -> XSecProtectorResult<Vec<u8>> {
         pending().await
     }
 
-    async fn unwrap_key<'a>(&'a self, _payload: &'a [u8]) -> XSecResult<SecretBox<[u8; 32]>> {
+    async fn unwrap_key<'a>(
+        &'a self,
+        _payload: &'a [u8],
+    ) -> XSecProtectorResult<SecretBox<[u8; 32]>> {
         pending().await
     }
 }
@@ -130,7 +136,7 @@ async fn add_key_protector_error_preserves_unlocked_state() {
 
     assert!(matches!(
         xsec.add_key_protector(&FailingProtector).await,
-        Err(XSecError::Crypto)
+        Err(XSecError::Protector(XSecProtectorError::Internal))
     ));
     assert_eq!(xsec.status(), XSecStatus::Unlocked);
     assert!(xsec.encrypt(b"still unlocked").is_ok());
@@ -283,6 +289,6 @@ async fn system_protector_is_explicitly_unavailable_without_a_backend() {
     assert_eq!(protector.kind(), "system");
     assert!(matches!(
         protector.check_availability().await,
-        Err(XSecError::SystemProtectorUnavailable)
+        Err(XSecProtectorError::Unavailable)
     ));
 }

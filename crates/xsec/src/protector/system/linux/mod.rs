@@ -12,7 +12,7 @@ use zbus::{
 use zbus_polkit::policykit1::{AuthorityProxy, CheckAuthorizationFlags, Subject};
 
 use super::hash_identity;
-use crate::{XSecError, XSecProtector, XSecResult};
+use crate::{XSecProtector, XSecProtectorError, XSecProtectorResult};
 
 const KIND: &str = "system";
 const MAGIC: &[u8; 6] = b"XSecLP";
@@ -40,7 +40,7 @@ impl XSecSystemProtector {
         Self::from_identity(hash_identity(&identity.into()))
     }
 
-    pub(crate) fn from_payload(payload: &[u8]) -> XSecResult<Self> {
+    pub(crate) fn from_payload(payload: &[u8]) -> XSecProtectorResult<Self> {
         let (identity, _) = parse_stored_payload(payload)?;
         Ok(Self::from_identity(*identity))
     }
@@ -52,7 +52,7 @@ impl XSecSystemProtector {
         }
     }
 
-    pub async fn check_availability(&self) -> XSecResult<()> {
+    pub async fn check_availability(&self) -> XSecProtectorResult<()> {
         let mut probe = [0; KEY_SIZE];
         SecureArray::from_slice_mut(&mut probe).map_err(map_secure_memory_error)?;
 
@@ -70,16 +70,16 @@ impl XSecSystemProtector {
         {
             Ok(())
         } else {
-            Err(XSecError::SystemAuthenticationNotConfigured)
+            Err(XSecProtectorError::NotConfigured)
         }
     }
 
-    pub async fn delete(&self) -> XSecResult<()> {
+    pub async fn delete(&self) -> XSecProtectorResult<()> {
         self.key()?.take();
         Ok(())
     }
 
-    async fn authorize(&self) -> XSecResult<()> {
+    async fn authorize(&self) -> XSecProtectorResult<()> {
         let connection = Connection::system().await.map_err(map_protector_error)?;
         let proxy = AuthorityProxy::new(&connection)
             .await
@@ -116,21 +116,24 @@ impl XSecSystemProtector {
             .get("polkit.dismissed")
             .is_some_and(|value| !value.is_empty())
         {
-            Err(XSecError::AuthenticationCancelled)
+            Err(XSecProtectorError::AuthenticationCancelled)
         } else {
-            Err(XSecError::AuthenticationFailed)
+            Err(XSecProtectorError::AuthenticationFailed)
         }
     }
 
-    fn key(&self) -> XSecResult<MutexGuard<'_, Option<StoredKey>>> {
-        self.key.lock().map_err(|_| XSecError::Crypto)
+    fn key(&self) -> XSecProtectorResult<MutexGuard<'_, Option<StoredKey>>> {
+        self.key.lock().map_err(|_| XSecProtectorError::Internal)
     }
 
-    fn copy_key(&self, expected_id: &[u8; KEY_ID_SIZE]) -> XSecResult<SecretBox<[u8; KEY_SIZE]>> {
+    fn copy_key(
+        &self,
+        expected_id: &[u8; KEY_ID_SIZE],
+    ) -> XSecProtectorResult<SecretBox<[u8; KEY_SIZE]>> {
         let key = self.key()?;
-        let stored = key.as_ref().ok_or(XSecError::SystemKeyNotFound)?;
+        let stored = key.as_ref().ok_or(XSecProtectorError::KeyNotFound)?;
         if stored.id != *expected_id {
-            return Err(XSecError::SystemKeyInvalidated);
+            return Err(XSecProtectorError::KeyInvalidated);
         }
         Ok(stored.key.unlock(|bytes| {
             let mut result = Box::new([0; KEY_SIZE]);
@@ -145,9 +148,12 @@ impl XSecProtector for XSecSystemProtector {
         KIND
     }
 
-    async fn wrap_key<'a>(&'a self, key: &'a SecretBox<[u8; KEY_SIZE]>) -> XSecResult<Vec<u8>> {
+    async fn wrap_key<'a>(
+        &'a self,
+        key: &'a SecretBox<[u8; KEY_SIZE]>,
+    ) -> XSecProtectorResult<Vec<u8>> {
         let mut key_id = [0; KEY_ID_SIZE];
-        getrandom::fill(&mut key_id).map_err(|_| XSecError::Crypto)?;
+        getrandom::fill(&mut key_id).map_err(|_| XSecProtectorError::Internal)?;
         let mut bytes = *key.expose_secret();
         let secure_key =
             SecureArray::from_slice_mut(&mut bytes).map_err(map_secure_memory_error)?;
@@ -164,7 +170,10 @@ impl XSecProtector for XSecSystemProtector {
         Ok(payload)
     }
 
-    async fn unwrap_key<'a>(&'a self, payload: &'a [u8]) -> XSecResult<SecretBox<[u8; KEY_SIZE]>> {
+    async fn unwrap_key<'a>(
+        &'a self,
+        payload: &'a [u8],
+    ) -> XSecProtectorResult<SecretBox<[u8; KEY_SIZE]>> {
         let key_id = parse_payload(payload, &self.identity)?;
         self.authorize().await?;
         self.copy_key(key_id)
@@ -174,52 +183,52 @@ impl XSecProtector for XSecSystemProtector {
 fn parse_payload<'a>(
     payload: &'a [u8],
     expected_identity: &[u8; IDENTITY_SIZE],
-) -> XSecResult<&'a [u8; KEY_ID_SIZE]> {
+) -> XSecProtectorResult<&'a [u8; KEY_ID_SIZE]> {
     let (identity, key_id) = parse_stored_payload(payload)?;
     if identity != expected_identity {
-        return Err(XSecError::SystemKeyInvalidated);
+        return Err(XSecProtectorError::KeyInvalidated);
     }
     Ok(key_id)
 }
 
-fn parse_stored_payload(payload: &[u8]) -> XSecResult<(&[u8; IDENTITY_SIZE], &[u8; KEY_ID_SIZE])> {
+fn parse_stored_payload(
+    payload: &[u8],
+) -> XSecProtectorResult<(&[u8; IDENTITY_SIZE], &[u8; KEY_ID_SIZE])> {
     if matches!(
         payload.get(..MAGIC.len()),
         Some(value) if value == WINDOWS_MAGIC || value == MACOS_MAGIC
     ) {
-        return Err(XSecError::IncompatibleSystemProtector);
+        return Err(XSecProtectorError::Incompatible);
     }
     if payload.len() != PAYLOAD_SIZE || payload.get(..MAGIC.len()) != Some(MAGIC) {
-        return Err(XSecError::Corrupted);
+        return Err(XSecProtectorError::InvalidData);
     }
     if u16::from_be_bytes(
         payload[MAGIC.len()..MAGIC.len() + 2]
             .try_into()
-            .map_err(|_| XSecError::Corrupted)?,
+            .map_err(|_| XSecProtectorError::InvalidData)?,
     ) != PAYLOAD_VERSION
     {
-        return Err(XSecError::UnsupportedVersion);
+        return Err(XSecProtectorError::Unsupported);
     }
     let identity_end = MAGIC.len() + 2 + IDENTITY_SIZE;
     let identity = payload[MAGIC.len() + 2..identity_end]
         .try_into()
-        .map_err(|_| XSecError::Corrupted)?;
+        .map_err(|_| XSecProtectorError::InvalidData)?;
     let key_id = payload[identity_end..]
         .try_into()
-        .map_err(|_| XSecError::Corrupted)?;
+        .map_err(|_| XSecProtectorError::InvalidData)?;
     Ok((identity, key_id))
 }
 
-fn map_secure_memory_error(error: secure_types::Error) -> XSecError {
-    XSecError::Protector {
-        source: Box::new(error),
-    }
+fn map_secure_memory_error(_error: secure_types::Error) -> XSecProtectorError {
+    XSecProtectorError::Internal
 }
 
-fn map_protector_error(error: impl std::error::Error + Send + Sync + 'static) -> XSecError {
-    XSecError::Protector {
-        source: Box::new(error),
-    }
+fn map_protector_error(
+    _error: impl std::error::Error + Send + Sync + 'static,
+) -> XSecProtectorError {
+    XSecProtectorError::Unavailable
 }
 
 #[cfg(test)]
@@ -258,7 +267,7 @@ mod tests {
         let first_key_id = parse_payload(&first, &protector.identity).unwrap();
         assert!(matches!(
             protector.copy_key(first_key_id),
-            Err(XSecError::SystemKeyInvalidated)
+            Err(XSecProtectorError::KeyInvalidated)
         ));
     }
 
@@ -268,7 +277,7 @@ mod tests {
         let key_id = [0; KEY_ID_SIZE];
         assert!(matches!(
             protector.copy_key(&key_id),
-            Err(XSecError::SystemKeyNotFound)
+            Err(XSecProtectorError::KeyNotFound)
         ));
     }
 
@@ -284,13 +293,13 @@ mod tests {
         let other_identity = hash_identity("another-account");
         assert!(matches!(
             parse_payload(&payload, &other_identity),
-            Err(XSecError::SystemKeyInvalidated)
+            Err(XSecProtectorError::KeyInvalidated)
         ));
 
         for platform_magic in [WINDOWS_MAGIC, MACOS_MAGIC] {
             assert!(matches!(
                 parse_payload(platform_magic, &protector.identity),
-                Err(XSecError::IncompatibleSystemProtector)
+                Err(XSecProtectorError::Incompatible)
             ));
         }
     }
@@ -306,13 +315,13 @@ mod tests {
 
         assert!(matches!(
             parse_payload(&payload[..payload.len() - 1], &protector.identity),
-            Err(XSecError::Corrupted)
+            Err(XSecProtectorError::InvalidData)
         ));
 
         payload[MAGIC.len()..MAGIC.len() + 2].copy_from_slice(&2u16.to_be_bytes());
         assert!(matches!(
             parse_payload(&payload, &protector.identity),
-            Err(XSecError::UnsupportedVersion)
+            Err(XSecProtectorError::Unsupported)
         ));
     }
 }

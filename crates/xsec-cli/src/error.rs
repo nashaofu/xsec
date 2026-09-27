@@ -1,7 +1,7 @@
 use std::io;
 
 use thiserror::Error;
-use xsec::XSecError;
+use xsec::{XSecError, XSecProtectorError};
 
 use crate::environment::{MAX_ENCRYPTED_ENV_FILE_SIZE, MAX_ENV_FILE_SIZE, MAX_PASSWORD_SIZE};
 
@@ -9,6 +9,8 @@ use crate::environment::{MAX_ENCRYPTED_ENV_FILE_SIZE, MAX_ENV_FILE_SIZE, MAX_PAS
 pub(crate) enum CliError {
     #[error(transparent)]
     XSec(#[from] XSecError),
+    #[error(transparent)]
+    Protector(#[from] XSecProtectorError),
     #[error("{context}: {source}")]
     Io {
         context: String,

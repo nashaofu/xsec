@@ -50,7 +50,7 @@ crate 根导出以下类型：
 
 ```rust
 pub use error::{XSecError, XSecResult};
-pub use protector::XSecProtector;
+pub use protector::{XSecProtector, XSecProtectorError, XSecProtectorResult};
 #[cfg(feature = "password-protector")]
 pub use protector::XSecPasswordProtector;
 pub use storage::{XSecStorage, XSecStorageError, XSecStorageResult};
@@ -169,7 +169,7 @@ impl<S: XSecStorage> XSec<S> {
 
 `is_loaded` 在 `Empty` 时返回 `false`，其余状态返回 `true`。`is_initialized` 只在 `Locked` 和 `Unlocked` 时返回 `true`。`is_locked` 在除 `Unlocked` 外的所有状态返回 `true`。
 
-`unlock` 只允许在 `Locked` 状态调用。它根据 `protector.kind()` 查找保护器记录，恢复 DEK，验证原始 metadata MAC，并在全部成功后进入 `Unlocked { storage, metadata, key }`。未初始化返回 `XSecError::NotInitialized`，认证失败返回 `XSecError::AuthenticationFailed`，已解锁时重复调用返回 `XSecError::AlreadyUnlocked`。
+`unlock` 只允许在 `Locked` 状态调用。它根据 `protector.kind()` 查找保护器记录，恢复 DEK，验证原始 metadata MAC，并在全部成功后进入 `Unlocked { storage, metadata, key }`。未初始化返回 `XSecError::NotInitialized`，认证失败返回 `XSecError::Protector(XSecProtectorError::AuthenticationFailed)`，已解锁时重复调用返回 `XSecError::AlreadyUnlocked`。
 
 `unlock_system` 从 system protector payload 恢复初始化时保存的 identity 哈希，创建当前平台的系统保护器后执行相同的解锁和 metadata MAC 校验。调用方不需要再次提供原始 identity。
 
@@ -335,17 +335,20 @@ pub trait XSecProtector: Send + Sync {
         &'a self,
         key: &'a SecretBox<[u8; 32]>,
     ) -> impl Future<
-        Output = XSecResult<Vec<u8>>,
+        Output = XSecProtectorResult<Vec<u8>>,
     > + Send + 'a;
 
     fn unwrap_key<'a>(
         &'a self,
         payload: &'a [u8],
     ) -> impl Future<
-        Output = XSecResult<SecretBox<[u8; 32]>>,
+        Output = XSecProtectorResult<SecretBox<[u8; 32]>>,
     > + Send + 'a;
 }
 ```
+
+Protector 只能返回 `XSecProtectorError` 定义的平台无关类别，不得返回 `XSecError`
+或在公共 API 中暴露系统 SDK、KMS 客户端和密码学库的具体错误类型。
 
 `kind` 返回稳定的保护器类型标识，用于确认实现能否处理对应 payload。标识属于持久化协议，发布后不得修改。v1 的 `kind` 只能包含 ASCII 小写字母、数字、点、下划线和连字符，必须匹配 `[a-z0-9][a-z0-9._-]*`，长度不得超过 128 bytes。同一个 metadata 中不允许出现两个相同的 `kind`。
 
@@ -442,7 +445,7 @@ v1 新建密码保护器时使用以下固定参数，调用方不能覆盖：
 | nonce length       | 必须等于算法规定的长度 |
 | derived key length |        必须为 32 bytes |
 
-memory cost 还必须满足 Argon2id 对 parallelism 的结构约束。参数越界、整数转换溢出或长度不匹配时，必须在分配 KDF 工作内存前返回 `XSecError::Corrupted`；版本不受支持时返回 `XSecError::UnsupportedVersion`。不得尝试使用更弱参数或猜测性解析。
+memory cost 还必须满足 Argon2id 对 parallelism 的结构约束。参数越界、整数转换溢出或长度不匹配时，必须在分配 KDF 工作内存前返回 `XSecProtectorError::InvalidData`；版本不受支持时返回 `XSecProtectorError::Unsupported`。不得尝试使用更弱参数或猜测性解析。
 
 XSec 对完整 metadata 额外设置 1 MiB 的大小上限、16 个保护器的数量上限、128 bytes 的 `kind` 长度上限和 64 KiB 的单个 payload 上限。`open` 必须先检查这些限制，再分配由 metadata 字段控制的可变长度缓冲区。内置 Storage 也应在读取文件或 HTTP 响应时限制最大 blob 大小，避免在解析前无界分配内存。
 
@@ -499,7 +502,6 @@ pub enum XSecError {
     Locked,
     Destroyed,
     AlreadyUnlocked,
-    AuthenticationFailed,
     Corrupted,
     InvalidCiphertext,
     UnsupportedVersion,
@@ -508,9 +510,7 @@ pub enum XSecError {
     ProtectorAlreadyExists,
     LastProtector,
     Storage(XSecStorageError),
-    Protector {
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
+    Protector(XSecProtectorError),
     Crypto,
 }
 
@@ -528,6 +528,25 @@ pub enum XSecStorageError {
 }
 
 pub type XSecStorageResult<T> = std::result::Result<T, XSecStorageError>;
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum XSecProtectorError {
+    Unsupported,
+    Unavailable,
+    NotConfigured,
+    Incompatible,
+    AccessDenied,
+    AuthenticationFailed,
+    AuthenticationCancelled,
+    UserVerificationRequired,
+    KeyNotFound,
+    KeyInvalidated,
+    InvalidData,
+    Internal,
+}
+
+pub type XSecProtectorResult<T> = std::result::Result<T, XSecProtectorError>;
 ```
 
 `XSecError` 使用 `#[non_exhaustive]`，允许后续增加错误类型。外部依赖的具体错误不直接成为公开 enum 成员，避免依赖升级改变 XSec 的公共 API。
@@ -535,6 +554,10 @@ pub type XSecStorageResult<T> = std::result::Result<T, XSecStorageError>;
 `XSec` 通过 `XSecError::Storage` 透明包装归一化后的 `XSecStorageError`，不识别具体
 storage 后端错误。`LimitExceeded` 表示 blob 超出 storage 契约或大小限制；blob
 已成功读取但 metadata 格式或认证无效时，由核心层返回 `XSecError::Corrupted`。
+
+`XSec` 通过 `XSecError::Protector` 透明包装 `XSecProtectorError`，不识别密码、
+系统认证、硬件密钥或远程 KMS 的具体实现错误。Protector 拥有 payload 协议，
+因此 payload 格式错误由 `XSecProtectorError::InvalidData` 表示。
 
 认证失败不暴露底层密码校验、系统认证或密文校验细节。损坏数据与尚未初始化必须使用不同错误。
 

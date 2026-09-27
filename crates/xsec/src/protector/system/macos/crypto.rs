@@ -7,7 +7,7 @@ use secrecy::{ExposeSecret, SecretBox};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::{XSecError, XSecResult};
+use crate::{XSecProtectorError, XSecProtectorResult};
 
 const MAGIC: &[u8; 6] = b"XSecMP";
 const WINDOWS_MAGIC: &[u8; 6] = b"XSecSP";
@@ -40,36 +40,42 @@ pub(super) struct MacosEnvelope<'a> {
 }
 
 impl<'a> MacosEnvelope<'a> {
-    pub(super) fn parse(payload: &'a [u8], expected_identity: &Identity) -> XSecResult<Self> {
+    pub(super) fn parse(
+        payload: &'a [u8],
+        expected_identity: &Identity,
+    ) -> XSecProtectorResult<Self> {
         Self::parse_inner(payload, Some(expected_identity))
     }
 
-    pub(super) fn parse_stored(payload: &'a [u8]) -> XSecResult<Self> {
+    pub(super) fn parse_stored(payload: &'a [u8]) -> XSecProtectorResult<Self> {
         Self::parse_inner(payload, None)
     }
 
-    fn parse_inner(payload: &'a [u8], expected_identity: Option<&Identity>) -> XSecResult<Self> {
+    fn parse_inner(
+        payload: &'a [u8],
+        expected_identity: Option<&Identity>,
+    ) -> XSecProtectorResult<Self> {
         if matches!(
             payload.get(..MAGIC.len()),
             Some(value) if value == WINDOWS_MAGIC || value == LINUX_MAGIC
         ) {
-            return Err(XSecError::IncompatibleSystemProtector);
+            return Err(XSecProtectorError::Incompatible);
         }
         if payload.len() != PAYLOAD_SIZE {
-            return Err(XSecError::Corrupted);
+            return Err(XSecProtectorError::InvalidData);
         }
         if payload.get(..MAGIC.len()) != Some(MAGIC) {
-            return Err(XSecError::Corrupted);
+            return Err(XSecProtectorError::InvalidData);
         }
         if read_u16(payload, MAGIC.len())? != ENVELOPE_VERSION {
-            return Err(XSecError::UnsupportedVersion);
+            return Err(XSecProtectorError::Unsupported);
         }
 
         let identity_start = MAGIC.len() + 2;
         let identity_end = identity_start + IDENTITY_SIZE;
         let identity = array(payload, identity_start)?;
         if expected_identity.is_some_and(|expected| identity != expected) {
-            return Err(XSecError::SystemKeyInvalidated);
+            return Err(XSecProtectorError::KeyInvalidated);
         }
 
         let key_hash_start = identity_end;
@@ -81,7 +87,7 @@ impl<'a> MacosEnvelope<'a> {
         let nonce_start = salt_end;
         let ephemeral_public_key = array(payload, public_key_start)?;
         if ephemeral_public_key[0] != 4 {
-            return Err(XSecError::Corrupted);
+            return Err(XSecProtectorError::InvalidData);
         }
 
         Ok(Self {
@@ -110,15 +116,17 @@ impl<'a> MacosEnvelope<'a> {
     pub(super) fn open(
         &self,
         shared_secret: &SharedSecret,
-    ) -> XSecResult<SecretBox<[u8; KEY_SIZE]>> {
+    ) -> XSecProtectorResult<SecretBox<[u8; KEY_SIZE]>> {
         let kek = derive_kek(
             shared_secret,
             self.salt,
             self.identity,
             self.recipient_key_hash,
         )?;
-        let cipher = Aes256Gcm::new_from_slice(&kek[..]).map_err(|_| XSecError::Crypto)?;
-        let nonce = Nonce::try_from(self.nonce.as_slice()).map_err(|_| XSecError::Corrupted)?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&kek[..]).map_err(|_| XSecProtectorError::Internal)?;
+        let nonce =
+            Nonce::try_from(self.nonce.as_slice()).map_err(|_| XSecProtectorError::InvalidData)?;
         let plaintext = Zeroizing::new(
             cipher
                 .decrypt(
@@ -128,10 +136,10 @@ impl<'a> MacosEnvelope<'a> {
                         aad: self.header,
                     },
                 )
-                .map_err(|_| XSecError::AuthenticationFailed)?,
+                .map_err(|_| XSecProtectorError::AuthenticationFailed)?,
         );
         if plaintext.len() != KEY_SIZE {
-            return Err(XSecError::Corrupted);
+            return Err(XSecProtectorError::InvalidData);
         }
 
         let mut key = Box::new([0; KEY_SIZE]);
@@ -146,11 +154,11 @@ pub(super) fn seal_key(
     recipient_key_hash: &[u8; KEY_HASH_SIZE],
     ephemeral_public_key: &PublicKey,
     shared_secret: &SharedSecret,
-) -> XSecResult<Vec<u8>> {
+) -> XSecProtectorResult<Vec<u8>> {
     let mut salt = [0; SALT_SIZE];
     let mut nonce = [0; NONCE_SIZE];
-    getrandom::fill(&mut salt).map_err(|_| XSecError::Crypto)?;
-    getrandom::fill(&mut nonce).map_err(|_| XSecError::Crypto)?;
+    getrandom::fill(&mut salt).map_err(|_| XSecProtectorError::Internal)?;
+    getrandom::fill(&mut nonce).map_err(|_| XSecProtectorError::Internal)?;
 
     let mut envelope = Vec::with_capacity(PAYLOAD_SIZE);
     envelope.extend_from_slice(MAGIC);
@@ -162,8 +170,8 @@ pub(super) fn seal_key(
     envelope.extend_from_slice(&nonce);
 
     let kek = derive_kek(shared_secret, &salt, identity, recipient_key_hash)?;
-    let cipher = Aes256Gcm::new_from_slice(&kek[..]).map_err(|_| XSecError::Crypto)?;
-    let nonce = Nonce::try_from(nonce.as_slice()).map_err(|_| XSecError::Crypto)?;
+    let cipher = Aes256Gcm::new_from_slice(&kek[..]).map_err(|_| XSecProtectorError::Internal)?;
+    let nonce = Nonce::try_from(nonce.as_slice()).map_err(|_| XSecProtectorError::Internal)?;
     let ciphertext = cipher
         .encrypt(
             &nonce,
@@ -172,7 +180,7 @@ pub(super) fn seal_key(
                 aad: &envelope,
             },
         )
-        .map_err(|_| XSecError::Crypto)?;
+        .map_err(|_| XSecProtectorError::Internal)?;
     envelope.extend_from_slice(&ciphertext);
     Ok(envelope)
 }
@@ -182,23 +190,23 @@ fn derive_kek(
     salt: &[u8; SALT_SIZE],
     identity: &Identity,
     recipient_key_hash: &[u8; KEY_HASH_SIZE],
-) -> XSecResult<Zeroizing<[u8; KEY_SIZE]>> {
+) -> XSecProtectorResult<Zeroizing<[u8; KEY_SIZE]>> {
     let mut kek = Zeroizing::new([0; KEY_SIZE]);
     Hkdf::<Sha256>::new(Some(salt), &shared_secret[..])
         .expand_multi_info(&[KDF_INFO, identity, recipient_key_hash], kek.as_mut())
-        .map_err(|_| XSecError::Crypto)?;
+        .map_err(|_| XSecProtectorError::Internal)?;
     Ok(kek)
 }
 
-fn array<const N: usize>(payload: &[u8], offset: usize) -> XSecResult<&[u8; N]> {
+fn array<const N: usize>(payload: &[u8], offset: usize) -> XSecProtectorResult<&[u8; N]> {
     payload
         .get(offset..offset + N)
-        .ok_or(XSecError::Corrupted)?
+        .ok_or(XSecProtectorError::InvalidData)?
         .try_into()
-        .map_err(|_| XSecError::Corrupted)
+        .map_err(|_| XSecProtectorError::InvalidData)
 }
 
-fn read_u16(payload: &[u8], offset: usize) -> XSecResult<u16> {
+fn read_u16(payload: &[u8], offset: usize) -> XSecProtectorResult<u16> {
     Ok(u16::from_be_bytes(*array(payload, offset)?))
 }
 
@@ -255,13 +263,13 @@ mod tests {
 
         assert!(matches!(
             MacosEnvelope::parse(&payload, &hash_identity("another-account")),
-            Err(XSecError::SystemKeyInvalidated)
+            Err(XSecProtectorError::KeyInvalidated)
         ));
 
         let envelope = MacosEnvelope::parse(&payload, &identity).unwrap();
         assert!(matches!(
             envelope.open(&Zeroizing::new([8; KEY_SIZE])),
-            Err(XSecError::AuthenticationFailed)
+            Err(XSecProtectorError::AuthenticationFailed)
         ));
     }
 
@@ -283,7 +291,7 @@ mod tests {
             let envelope = MacosEnvelope::parse(&tampered, &identity).unwrap();
             assert!(matches!(
                 envelope.open(&shared_secret),
-                Err(XSecError::AuthenticationFailed)
+                Err(XSecProtectorError::AuthenticationFailed)
             ));
         }
     }
@@ -295,27 +303,27 @@ mod tests {
 
         assert!(matches!(
             MacosEnvelope::parse(&payload[..payload.len() - 1], &identity),
-            Err(XSecError::Corrupted)
+            Err(XSecProtectorError::InvalidData)
         ));
 
         let mut trailing = payload.clone();
         trailing.push(0);
         assert!(matches!(
             MacosEnvelope::parse(&trailing, &identity),
-            Err(XSecError::Corrupted)
+            Err(XSecProtectorError::InvalidData)
         ));
 
         let mut wrong_version = payload;
         wrong_version[MAGIC.len()..MAGIC.len() + 2].copy_from_slice(&2u16.to_be_bytes());
         assert!(matches!(
             MacosEnvelope::parse(&wrong_version, &identity),
-            Err(XSecError::UnsupportedVersion)
+            Err(XSecProtectorError::Unsupported)
         ));
 
         for platform_magic in [WINDOWS_MAGIC, LINUX_MAGIC] {
             assert!(matches!(
                 MacosEnvelope::parse(platform_magic, &identity),
-                Err(XSecError::IncompatibleSystemProtector)
+                Err(XSecProtectorError::Incompatible)
             ));
         }
     }
@@ -329,7 +337,7 @@ mod tests {
 
         assert!(matches!(
             MacosEnvelope::parse(&payload, &identity),
-            Err(XSecError::Corrupted)
+            Err(XSecProtectorError::InvalidData)
         ));
     }
 }
